@@ -1397,6 +1397,60 @@ def p56():
     app.processEvents()
 
 
+@prueba("Actualización automática: bajada la versión nueva, se instala SOLA cuando RawFlow está libre (aviso de 30 s); "
+        "con una memoria puesta o un evento en marcha espera, y si pones una memoria durante el aviso se cancela")
+def p66():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from rawflow import app as ra, update
+    from unittest import mock
+    _Tarjeta = lambda: mock.MagicMock(selected=False)            # una memoria puesta (no seleccionada)
+    inst = td.TMP / "RawFlow-9.9-Windows-Instalador.exe"
+    inst.write_bytes(b"MZ")
+    w = ra.MainWindow()
+    w.btn_auto.blockSignals(True)
+    w.btn_auto.setChecked(False)
+    w.btn_auto.blockSignals(False)
+    w._log = lambda m: None
+    instalados, cerrar = [], []
+    orig = update.install
+    update.install = lambda p: instalados.append(Path(p).name)
+    w.close = lambda: cerrar.append(1) or True
+    try:
+        w.update_info = {"version": "9.9", "size": 2}
+        w.cards = {"memoria": _Tarjeta()}                           # una memoria puesta: no se toca nada
+        w._auto_ready("9.9", str(inst), "")
+        w._auto_tick()
+        assert not getattr(w, "_upd_count", 0) and not instalados
+        w.cards = {}                                              # libre: empieza el aviso
+        w._auto_tick()
+        assert w._upd_count == w.AUTO_WAIT and "sola en 30 s" in w.btn_update.text(), w.btn_update.text()
+        for _ in range(5):
+            w._auto_count()
+        w.cards = {"memoria": _Tarjeta()}                           # pones una memoria durante el aviso: se cancela
+        w._auto_count()
+        assert w._upd_count == 0 and not instalados and w.btn_update.text() == "Actualizar a 9.9"
+        w.cards = {}
+        w._auto_tick()
+        for _ in range(w.AUTO_WAIT):
+            w._auto_count()
+        assert instalados == [inst.name], instalados              # se instaló sola, una vez
+        assert "Instalando" in w.status.text()
+        instalados.clear()
+        w._upd_count = 0
+        w._update_now()                                           # el botón: ya está bajada → se instala sin bajarla otra vez
+        assert instalados == [inst.name], instalados
+    finally:
+        update.install = orig
+        for t in ("_upd_cd", "_upd_idle"):
+            if getattr(w, t, None) is not None:
+                getattr(w, t).stop()
+        w.shutdown()
+        w.deleteLater()
+        app.processEvents()
+
+
 # ======================================================================= Selección IA (tomas malas, antes de DxO)
 def _cara(x=0.4, y=0.5, w=0.1, h=0.15, ojos=(0.3, 0.3), pitch=0.05, yaw=0.0, nit=300.0, lum=130.0):
     return {"x": x, "y": y, "w": w, "h": h, "ojoI": ojos[0], "ojoD": ojos[1], "pitch": pitch, "yaw": yaw,

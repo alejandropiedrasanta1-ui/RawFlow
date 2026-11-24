@@ -929,6 +929,98 @@ class MainWindow(QMainWindow):
             self.btn_update.show()
             anim.fade_in(self.btn_update, 400)
         self._log(f"Hay una versión nueva de RawFlow: {info['version']}")
+        self._auto_download(info)
+
+    # ---- actualización automática: se baja sola y se instala cuando RawFlow está quieto
+    AUTO_WAIT = 30                             # s de aviso antes de instalar (cualquier actividad lo cancela)
+
+    def _auto_download(self, info: dict):
+        """Se baja en segundo plano, sin preguntar ni bloquear nada (los eventos siguen pudiendo empezar)."""
+        done = getattr(self, "_upd_path", None)
+        if done and done[0] == info["version"]:
+            return
+        w = getattr(self, "_upd_auto", None)
+        try:
+            if w is not None and w.isRunning():
+                return
+        except RuntimeError:
+            pass
+        w = self._upd_auto = UpdateWorker(self, info)
+        w.ready.connect(lambda path, err, v=info["version"]: self._auto_ready(v, path, err))
+        w.start()
+
+    def _auto_ready(self, version: str, path: str, err: str):
+        if err or not path:
+            self._upd_now = False
+            self.btn_update.setEnabled(True)
+            self.btn_update.setText(f"Actualizar a {version}")
+            self._log(f"⚠ Actualización automática: {err or 'no se pudo descargar'} (queda el botón para hacerlo a mano)")
+            return
+        self._upd_path = (version, path)
+        self._log(f"Actualización {version} descargada: se instala sola cuando RawFlow esté libre.")
+        if getattr(self, "_upd_now", False):       # la pediste con el botón mientras se bajaba
+            self._upd_now = False
+            self.btn_update.setEnabled(True)
+            if not (self.pipe is not None and self.pipe.isRunning()):
+                self._install_downloaded()
+                return
+        if getattr(self, "_upd_idle", None) is None:
+            self._upd_idle = QTimer(self, interval=20_000, timeout=self._auto_tick)
+            self._upd_idle.start()
+        QTimer.singleShot(1500, self._auto_tick)
+
+    def _idle_for_update(self) -> bool:
+        """¿Se puede cerrar RawFlow para instalar? Sin evento, sin cuenta atrás, sin memorias ni carpetas puestas, sin
+        ninguna ventana abierta encima y sin descargas a mano."""
+        if self.pipe is not None and self.pipe.isRunning():
+            return False
+        if self.countdown_left or self.cards or self._updating():
+            return False
+        return QApplication.activeModalWidget() is None
+
+    def _auto_tick(self):
+        if not getattr(self, "_upd_path", None) or getattr(self, "_upd_count", 0):
+            return
+        if not self._idle_for_update():
+            return
+        self._upd_count = self.AUTO_WAIT
+        self._upd_cd = QTimer(self, interval=1000, timeout=self._auto_count)
+        self._upd_cd.start()
+        self._auto_count(first=True)
+
+    def _auto_count(self, first: bool = False):
+        v = self._upd_path[0]
+        if not self._idle_for_update():            # pusiste una memoria, empezó algo…: se espera a otro momento
+            self._upd_cd.stop()
+            self._upd_count = 0
+            self.btn_update.setText(f"Actualizar a {v}")
+            self._update_summary()
+            return
+        if not first:
+            self._upd_count -= 1
+        if self._upd_count <= 0:
+            self._upd_cd.stop()
+            self._install_downloaded()
+            return
+        self.btn_update.setText(f"Actualizar ya  ·  sola en {self._upd_count} s")
+        self.status.setText(f"RawFlow {v} está lista: se instala sola en {self._upd_count} s y se abre otra vez "
+                            "(tus ajustes y eventos no se tocan). Si pones una memoria, espera a que termines.")
+
+    def _install_downloaded(self):
+        v, path = self._upd_path
+        from . import update
+        try:
+            update.install(Path(path))
+        except Exception as e:  # noqa: BLE001
+            self._upd_count = 0
+            self._upd_path = None                  # se vuelve a bajar en la próxima comprobación
+            self.btn_update.setText(f"Actualizar a {v}")
+            self.status.setText(f"No se pudo abrir el instalador: {e}")
+            self._log(f"⚠ Actualización: no se pudo abrir el instalador: {e}")
+            return
+        self._log(f"Instalando RawFlow {v}: RawFlow se cierra y se abre actualizada.")
+        self.status.setText("Instalando… RawFlow se abrirá sola en un momento.")
+        QTimer.singleShot(600, self.close)
 
     def _update_now(self):
         info = getattr(self, "update_info", None)
@@ -936,6 +1028,22 @@ class MainWindow(QMainWindow):
             return
         if self.pipe is not None and self.pipe.isRunning():
             QMessageBox.information(self, APP_NAME, "Hay un evento en marcha: actualiza cuando termine.")
+            return
+        done = getattr(self, "_upd_path", None)
+        if done and done[0] == info["version"] and Path(done[1]).exists():   # ya bajada: se instala ahora
+            if getattr(self, "_upd_count", 0):
+                self._upd_cd.stop()
+            self._install_downloaded()
+            return
+        w = getattr(self, "_upd_auto", None)
+        try:
+            bajando = w is not None and w.isRunning()
+        except RuntimeError:
+            bajando = False
+        if bajando:                                # la automática ya la está bajando: se instala en cuanto acabe
+            self._upd_now = True
+            self.btn_update.setEnabled(False)
+            self.btn_update.setText("Descargando… se instala al terminar")
             return
         mb = info["size"] / 1e6 if info.get("size") else 0
         r = QMessageBox.question(self, APP_NAME, f"¿Actualizar RawFlow a la versión {info['version']}?\n\n"
