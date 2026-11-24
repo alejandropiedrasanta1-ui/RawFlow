@@ -54,6 +54,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
+      - name: Carpetas de los programas (vacías, solo para las pruebas)
+        # Las pruebas simulan DxO, Imagen, Bridge y Retouch4me, pero RawFlow comprueba que estén «instalados»
+        # (que exista su .app en Aplicaciones). En este servidor no lo están: se crean sus carpetas vacías.
+        run: |
+          sudo mkdir -p "/Applications/ImagenAI.app" "/Applications/Retouch4me Arams.app" \
+                        "/Applications/Adobe Bridge 2026/Adobe Bridge 2026.app" \
+                        "/Applications/PureRAW 6/DxO PureRAW 6.app"
       - name: Compilar RawFlow.app y «Instalar RawFlow.app»
         env:
           RAWFLOW_WINDOWS: '0'
