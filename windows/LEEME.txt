@@ -1,0 +1,21 @@
+RAWFLOW PARA WINDOWS · INSTALADOR
+
+1. Copia a tu PC «RawFlow X para Windows (Instalador).exe» (por USB, por ejemplo).
+   Es el ÚNICO archivo que hace falta: no hay que descomprimir nada.
+2. Doble clic → «Siguiente» → «Instalar».
+   No necesita internet, ni Python, ni permisos de administrador. Tarda menos de un minuto.
+3. Al terminar, RawFlow se abre solo. Después, con su icono del Escritorio o del menú Inicio.
+
+Si Windows avisa «Windows protegió tu PC», pulsa «Más información» → «Ejecutar de todas formas».
+
+· Para actualizar: abre el instalador de la versión nueva (reemplaza la anterior, también la antigua
+  que se instalaba con «Instalar RawFlow.bat»; no duplica nada).
+· Para quitarlo: Configuración → Aplicaciones → RawFlow → «Desinstalar»
+  (tus fotos, tus eventos y tus ajustes no se tocan).
+· Funciona en PCs normales (x64) y en las ARM con Windows 11 (Surface y similares).
+· DxO PureRAW, Imagen AI, Adobe Bridge, Retouch4me y CineSlide se instalan aparte, con sus
+  propios instaladores y licencias (en «Instaladores/WINDOWS/Programas para Windows»);
+  RawFlow los encuentra solo.
+
+PARA CREAR EL INSTALADOR (quien compila): doble clic en «build_windows.bat».
+Sale en «dist\windows». Necesita Python 3.14 e Inno Setup 6.

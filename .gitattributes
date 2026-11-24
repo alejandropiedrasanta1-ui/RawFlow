@@ -1,0 +1,16 @@
+# Los scripts del Mac necesitan finales de línea de Unix aunque se editen en Windows
+*.sh       text eol=lf
+*.command  text eol=lf
+*.swift    text eol=lf
+*.py       text eol=lf
+*.js       text eol=lf
+*.yml      text eol=lf
+*.md       text eol=lf
+*.iss      text eol=crlf
+*.bat      text eol=crlf
+*.ps1      text eol=crlf
+
+*.ttf  binary
+*.ico  binary
+*.cer  binary
+*.jsonl text eol=lf

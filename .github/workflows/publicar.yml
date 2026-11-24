@@ -1,0 +1,97 @@
+# Compila RawFlow para Windows y para Mac y publica la versión en «Releases».
+# RawFlow instalada mira ahí la última versión y ofrece actualizarse sola (rawflow/update.py).
+#
+# Para publicar una versión nueva:
+#   1. Sube el número en rawflow/__init__.py   (p. ej. 4.20)
+#   2. git commit + git tag v4.20 + git push --tags
+# También se puede lanzar a mano (pestaña «Actions» → «Run workflow»): compila y deja los instaladores como
+# «artifacts», sin publicar nada.
+name: Compilar y publicar
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows (instalador .exe)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - name: Compilar RawFlow.exe y su instalador
+        shell: pwsh
+        env:
+          RAWFLOW_PYTHON: python
+        run: ./windows/build_windows.ps1
+      - name: Nombre sin espacios para publicar
+        shell: pwsh
+        run: |
+          $ver = [regex]::Match((Get-Content rawflow/__init__.py -Raw), '__version__\s*=\s*"([^"]+)"').Groups[1].Value
+          New-Item -ItemType Directory salida -Force | Out-Null
+          Copy-Item "dist/windows/RawFlow $ver para Windows (Instalador).exe" "salida/RawFlow-$ver-Windows-Instalador.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: salida/*.exe
+          if-no-files-found: error
+
+  mac:
+    name: Mac (instalador de un clic)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Compilar RawFlow.app y «Instalar RawFlow.app»
+        env:
+          RAWFLOW_WINDOWS: '0'
+        run: bash build_mac.sh
+      - name: Nombre sin espacios para publicar
+        run: |
+          VER=$(python3 -c "import re; print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', open('rawflow/__init__.py').read()).group(1))")
+          mkdir -p salida
+          cp "dist/Instalar RawFlow (Mac).zip" "salida/RawFlow-$VER-Mac.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: salida/*.zip
+          if-no-files-found: error
+
+  publicar:
+    name: Publicar la versión
+    needs: [windows, mac]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: salida
+          merge-multiple: true
+      - name: La etiqueta tiene que ser la versión del código
+        run: |
+          VER=$(python3 -c "import re; print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', open('rawflow/__init__.py').read()).group(1))")
+          if [ "v$VER" != "$GITHUB_REF_NAME" ]; then
+            echo "La etiqueta es $GITHUB_REF_NAME pero rawflow/__init__.py dice $VER: no se publica."; exit 1
+          fi
+          echo "VER=$VER" >> "$GITHUB_ENV"
+      - name: Crear la versión con sus instaladores
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la salida
+          gh release create "$GITHUB_REF_NAME" salida/* \
+            --title "RawFlow $VER" \
+            --notes "RawFlow $VER para Windows y Mac. Si ya tienes RawFlow, se actualiza sola desde el botón «Actualizar» de su ventana."

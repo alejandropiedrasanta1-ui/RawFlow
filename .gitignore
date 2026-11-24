@@ -1,0 +1,20 @@
+# Lo que se genera al compilar o al abrir RawFlow desde el código
+dist/
+build/
+.venv/
+.venv-win/
+__pycache__/
+*.pyc
+
+# Ayudantes nativos del Mac (se compilan con build_mac.sh a partir de sus .swift)
+tools/rfui
+tools/calibrar/prevjpg
+
+# Restos de macOS y Windows
+._*
+.DS_Store
+desktop.ini
+Thumbs.db
+
+# Ajustes locales de herramientas
+.claude/

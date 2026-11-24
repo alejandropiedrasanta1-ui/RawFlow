@@ -1,0 +1,12 @@
+PySide6>=6.12
+psutil>=7.2
+# Windows: OCR integrado (leer la pantalla de ImagenAI y Bridge, como rfui en el Mac)
+winrt-runtime>=3.2; sys_platform == "win32"
+winrt-Windows.Foundation>=3.2; sys_platform == "win32"
+winrt-Windows.Foundation.Collections>=3.2; sys_platform == "win32"
+winrt-Windows.Globalization>=3.2; sys_platform == "win32"
+winrt-Windows.Graphics.Imaging>=3.2; sys_platform == "win32"
+winrt-Windows.Media.Ocr>=3.2; sys_platform == "win32"
+winrt-Windows.Storage.Streams>=3.2; sys_platform == "win32"
+# Iconos (colección Phosphor) para pasos y botones
+qtawesome>=1.4
