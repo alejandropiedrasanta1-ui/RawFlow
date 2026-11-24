@@ -1912,7 +1912,11 @@ def start_screen(settings):
 
 def main():
     _crash_guard()
-    if sys.platform == "win32":             # barra de tareas: icono y grupo propios (no los de Python)
+    # Barra de tareas: icono y grupo propios, pero SOLO al abrir RawFlow desde el código (si no, sale como «Python»).
+    # El RawFlow.exe instalado ya tiene los suyos; ponerle un identificador a mano hacía que Windows, al volver a
+    # abrirlo desde la barra de tareas, buscara un programa llamado «rawflow.rawflow» (24-nov-2026: «Windows no
+    # puede encontrar el archivo "rawflow.rawflow"»).
+    if sys.platform == "win32" and not getattr(sys, "frozen", False):
         try:
             import ctypes
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("RawFlow.RawFlow")
