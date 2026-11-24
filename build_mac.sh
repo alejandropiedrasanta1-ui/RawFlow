@@ -24,8 +24,10 @@ iconutil -c icns build/RawFlow.iconset -o build/RawFlow.icns
 
 # Ayudante nativo (OCR de pantalla + clics) para el paso de Imagen/Bridge
 # ---- pruebas: si alguna falla (duplicados, nombres, proyectos…), no se compila
-.venv/bin/python tests/test_duplicados.py || { echo "PRUEBAS FALLIDAS: no se compila"; exit 1; }
-.venv/bin/python tests/pruebas_rawflow.py || { echo "PRUEBAS NUMERADAS FALLIDAS: no se compila"; exit 1; }
+FALLO=0                                    # se pasan las dos tandas enteras para ver TODO lo que falla de una vez
+.venv/bin/python tests/test_duplicados.py || FALLO=1
+.venv/bin/python tests/pruebas_rawflow.py || FALLO=1
+[ "$FALLO" = "0" ] || { echo "PRUEBAS FALLIDAS: no se compila"; exit 1; }
 
 swiftc -O tools/rfui.swift -o build/rfui 2>/dev/null || { echo "rfui (ayudante nativo) no compila: no se sigue"; exit 1; }
 cp build/rfui tools/rfui                # el mismo ayudante al abrir RawFlow desde el código

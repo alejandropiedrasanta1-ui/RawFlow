@@ -339,9 +339,9 @@ def contar_fotos_del_proyecto():
 def retouch_reanuda_sin_repetir():
     """Retouch4me reintentado: las que ya están en «4 Fotos finales» no se vuelven a retocar."""
     from rawflow import arams_ui
-    if core.SYSTEM != "Darwin":
-        return                                   # Retouch4me automático solo existe en Mac
-    
+    if core.SYSTEM != "Darwin" or not arams_ui.APP_PATH.exists():
+        return                                   # necesita Retouch4me Arams instalado (en GitHub no lo está)
+
     src, dest = fresh("ret_src"), fresh("ret_dst")
     for n in ("A.jpg", "B.jpg", "C.jpg"):
         write(src / n, b"x" * 200_000)
