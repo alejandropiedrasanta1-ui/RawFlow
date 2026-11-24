@@ -40,6 +40,7 @@ Paso 'Pruebas (si alguna falla, no se compila)...'
 # reales y pasan también sin esos programas instalados (como en el servidor de GitHub). Las solo-Mac salen «saltadas».
 $qpa = $env:QT_QPA_PLATFORM
 $env:QT_QPA_PLATFORM = 'offscreen'
+$env:PYTHONIOENCODING = 'utf-8'      # la consola de GitHub (cp1252) no sabe escribir «✓» ni «✗»
 $fallo = $false
 foreach ($t in 'tests\test_duplicados.py', 'tests\pruebas_rawflow.py') {
     & $vpy $t
