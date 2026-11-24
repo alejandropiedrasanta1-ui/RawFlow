@@ -46,8 +46,10 @@ def _family(mono: bool) -> str:
     return _FAMILY[mono]
 
 
-def font(size: float, weight=QFont.Weight.Normal, mono=False) -> QFont:
-    key = (round(size), weight, bool(mono))
+def font(size: float, weight=QFont.Weight.Normal, mono=False, tnum=False) -> QFont:
+    """`tnum`: cifras de igual ancho (tiempos, contadores): los números no «bailan» al cambiar y las columnas
+    cuadran, con la misma letra que el resto (antes los tiempos iban en una fuente de terminal)."""
+    key = (round(size), weight, bool(mono), bool(tnum))
     f = _FONTS.get(key)
     if f is None:
         kind = QFontDatabase.SystemFont.FixedFont if mono else QFontDatabase.SystemFont.GeneralFont
@@ -57,6 +59,11 @@ def font(size: float, weight=QFont.Weight.Normal, mono=False) -> QFont:
             f.setFamily(fam)
         f.setPixelSize(max(1, key[0]))
         f.setWeight(weight)
+        if tnum and not mono:
+            try:
+                f.setFeature(QFont.Tag("tnum"), 1)
+            except Exception:  # noqa: BLE001  (Qt < 6.7: sin cifras tabulares, nada más)
+                pass
         _FONTS[key] = f
     return QFont(f)                         # copia barata: quien la reciba puede cambiarla sin tocar la guardada
 
@@ -127,6 +134,143 @@ class ElidedLabel(QLabel):
     def _update(self):
         fm = QFontMetrics(self.font())
         super().setText(fm.elidedText(self._full, self._mode, max(40, self.width())))
+
+
+class StatusLabel(ElidedLabel):
+    """La línea de estado: verde si algo terminó bien («✓ Listo…»), roja si se detuvo o falló, gris lo demás.
+    Así el resultado se ve de un vistazo, sin leerlo."""
+
+    BAD = ("⚠", "✗", "✘", "Se detuvo", "No se pudo")
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent, mode=Qt.TextElideMode.ElideRight)
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        super().setText(text)
+        s = (text or "").lstrip()
+        tone = "ok" if s.startswith(("✓", "✔")) else "bad" if s.startswith(self.BAD) else ""
+        if tone != getattr(self, "_tone", None):
+            self._tone = tone
+            col = {"ok": T.OK, "bad": T.DANGER}.get(tone, T.MUTED)
+            self.setStyleSheet(f"color:{col};" + (" font-weight:600;" if tone else ""))
+
+
+class PathLabel(QWidget):
+    """Ruta de la carpeta del evento: la carpeta que se crea, resaltada al final; lo de antes, atenuado. Si no cabe se
+    recorta por el medio de la parte atenuada (el nombre del evento siempre se ve). Entera al pasar el ratón."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._text = ""
+        self._f1, self._f2 = font(13), font(13, QFont.Weight.DemiBold)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(QFontMetrics(self._f2).height() + 4)
+
+    def text(self) -> str:
+        return self._text
+
+    full = text
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        if text != self._text:
+            self._text = text
+            self.setToolTip(text)
+            self.update()
+
+    def paintEvent(self, _):  # noqa: N802
+        t = self._text
+        cut = max(t.rfind("\\"), t.rfind("/"))
+        base, name = (t[:cut + 1], t[cut + 1:]) if cut >= 0 else ("", t)
+        fm1, fm2 = QFontMetrics(self._f1), QFontMetrics(self._f2)
+        w, h = self.width(), self.height()
+        if fm2.horizontalAdvance(name) >= w - 40:                 # ni el nombre cabe: solo él, recortado al final
+            base, name = "", fm2.elidedText(name, Qt.TextElideMode.ElideRight, w)
+        elif fm1.horizontalAdvance(base) > w - fm2.horizontalAdvance(name):
+            base = fm1.elidedText(base, Qt.TextElideMode.ElideMiddle, w - fm2.horizontalAdvance(name))
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        bw = fm1.horizontalAdvance(base)
+        align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        p.setFont(self._f1)
+        p.setPen(QColor(T.MUTED))
+        p.drawText(QRectF(0, 0, bw + 2, h), align, base)
+        p.setFont(self._f2)
+        p.setPen(QColor(T.TEXT))
+        p.drawText(QRectF(bw, 0, max(0, w - bw), h), align, name)
+
+
+class SwitchButton(QPushButton):
+    """Interruptor (un estado, no una acción): pastilla con su palanca, lima si está encendido. Sigue siendo un
+    QPushButton «checkable» (toggled, setChecked, barra espaciadora…); solo cambia cómo se ve."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        self.setFont(font(12, QFont.Weight.DemiBold))
+        self._k, self._hov = 0.0, False
+        self._a = QVariantAnimation(self, duration=180, easingCurve=QEasingCurve.Type.OutCubic)
+        self._a.valueChanged.connect(self._step)
+        self.toggled.connect(self._animate)
+
+    def _step(self, v) -> None:
+        self._k = float(v)
+        self.update()
+
+    def _animate(self, on: bool) -> None:
+        to = 1.0 if on else 0.0
+        self._a.stop()
+        if T.reduce_motion() or not self.isVisible():
+            self._step(to)
+            return
+        self._a.setStartValue(self._k)
+        self._a.setEndValue(to)
+        self._a.start()
+
+    def sizeHint(self):  # noqa: N802
+        from PySide6.QtCore import QSize
+        return QSize(12 + 28 + 9 + QFontMetrics(self.font()).horizontalAdvance(self.text()) + 14, 28)
+
+    def minimumSizeHint(self):  # noqa: N802
+        return self.sizeHint()
+
+    def enterEvent(self, e):  # noqa: N802
+        self._hov = True
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):  # noqa: N802
+        self._hov = False
+        self.update()
+        super().leaveEvent(e)
+
+    def paintEvent(self, _):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        k = self._k
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        off_bg = QColor(T.SURFACE_2)
+        off_bg.setAlpha(0)
+        on_bg = QColor(T.ACCENT)
+        on_bg.setAlpha(22)
+        on_border = QColor(T.ACCENT)
+        on_border.setAlpha(115)
+        p.setPen(QPen(mix(QColor(T.BORDER_HI if self._hov else T.BORDER), on_border, k), 1))
+        p.setBrush(mix(off_bg, on_bg, k))
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        tw, th = 28.0, 16.0                                           # la palanca
+        tr = QRectF(r.left() + 11, r.center().y() - th / 2, tw, th)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(mix(QColor(T.BORDER_HI), QColor(T.ACCENT), k))
+        p.drawRoundedRect(tr, th / 2, th / 2)
+        d = th - 4
+        p.setBrush(mix(QColor(T.MUTED if not self._hov else T.TEXT), QColor(T.ACCENT_INK), k))
+        p.drawEllipse(QRectF(tr.left() + 2 + (tw - d - 4) * k, tr.top() + 2, d, d))
+        p.setPen(mix(QColor(T.TEXT if self._hov else T.MUTED), QColor(T.ACCENT), k))
+        p.setFont(self.font())
+        p.drawText(QRectF(tr.right() + 9, r.top(), r.right() - tr.right() - 9, r.height()),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self.text())
 
 
 # --------------------------------------------------------------------------
@@ -286,7 +430,7 @@ class ActivityView(QWidget):
         import collections
         self._pending: "collections.deque" = collections.deque()
         self._lines: List[tuple] = []                 # (hora, texto, momento en que entró)
-        self.setMinimumHeight(60)
+        self.setMinimumHeight(0)                      # lo único que cede si la ventana es baja (nunca pisa «Empezar»)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._poll = QTimer(self, interval=150, timeout=self._drain)
         self._poll.start()
@@ -319,13 +463,17 @@ class ActivityView(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         w, h = self.width(), self.height()
+        p.fillRect(QRectF(0, 0, w, 1), QColor(T.BORDER))          # separa lo de ahora (arriba) del historial
+        if h < 56:                                                 # ventana muy baja: sin sitio para renglones
+            self._frames.stop()
+            return
         p.setFont(font(11, QFont.Weight.DemiBold))
         p.setPen(QColor(T.MUTED))
         f = p.font()
         f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.5)
         p.setFont(f)
-        p.drawText(QPointF(0, 14), "ACTIVIDAD")
-        top = 30
+        p.drawText(QPointF(0, 32), "ACTIVIDAD")
+        top = 46
         if not self._lines:
             p.setFont(font(12.5))
             p.setPen(QColor(T.FAINT))
@@ -334,7 +482,7 @@ class ActivityView(QWidget):
             self._frames.stop()
             return
         now = _t.monotonic()
-        tf, lf = font(11, mono=True), font(12)
+        tf, lf = font(11.5, tnum=True), font(12)
         fm = QFontMetrics(lf)
         row = 23
         n = max(1, int((h - top) // row))
@@ -397,6 +545,8 @@ class DriveCard(QFrame):
         self.setFixedHeight(self.H)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMouseTracking(True)
+        if drive.fstype == "carpeta":
+            self.setToolTip(drive.mountpoint)             # la ruta entera (en la tarjeta solo cabe dónde está)
         self._timer = QTimer(self, interval=16, timeout=self._tick)
         self._timer.start()
         self._fade = QVariantAnimation(self, startValue=0.0, endValue=1.0, duration=380,
@@ -507,24 +657,26 @@ class DriveCard(QFrame):
             for k in range(3):
                 p.drawRect(QRectF(sx + 5 + k * 3.6, sy + 2.5, 1.6, 5))
 
-        # textos
+        # textos (el nombre deja sitio al check; la línea de debajo ya no lo tiene encima y usa todo el ancho)
         tx = ix + 56
         tw = r.width() - (tx - r.left()) - 52
         p.setPen(QColor(T.TEXT))
         p.setFont(font(14, QFont.Weight.DemiBold))
         fm = QFontMetrics(p.font())
         p.drawText(QPointF(tx, iy + 16), fm.elidedText(self.drive.label, Qt.TextElideMode.ElideRight, int(tw)))
-        p.setFont(font(11))
+        p.setFont(font(11.5))
         p.setPen(QColor(T.MUTED))
-        if self.drive.fstype == "carpeta":
-            sub = f"Carpeta arrastrada · {self.drive.mountpoint.rsplit('/', 1)[0] or '/'}"
+        if self.drive.fstype == "carpeta":                  # dónde está (la carpeta de arriba), en Mac y en Windows
+            import os
+            up = os.path.basename(os.path.dirname(self.drive.mountpoint.rstrip("\\/")))
+            sub = f"Carpeta · en {up}" if up else "Carpeta arrastrada"
         elif self.drive.fstype == "sueltas":
             sub = "Fotos arrastradas"
         else:
-            kind = "Tarjeta / USB" if self.drive.removable else "Disco externo"
+            kind = "Memoria" if self.drive.removable else "Disco externo"
             sub = f"{kind} · {human_size(self.drive.total)} · {self.drive.fstype or '—'}"
         fm = QFontMetrics(p.font())
-        p.drawText(QPointF(tx, iy + 36), fm.elidedText(sub, Qt.TextElideMode.ElideRight, int(tw)))
+        p.drawText(QPointF(tx, iy + 36), fm.elidedText(sub, Qt.TextElideMode.ElideRight, int(r.right() - 18 - tx)))
 
         # check
         cr = QRectF(r.right() - 38, r.top() + 18, 22, 22)
@@ -561,7 +713,8 @@ class DriveCard(QFrame):
         bar = QRectF(r.left() + 18, by, r.width() - 36, 4)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(T.BG))
-        p.drawRoundedRect(bar, 2, 2)
+        if self.state == "scanning" or self.drive.total:   # carpeta arrastrada: no tiene «capacidad», sin barra vacía
+            p.drawRoundedRect(bar, 2, 2)
         if self.state == "scanning":
             w = bar.width() * 0.28
             x = bar.left() - w + (bar.width() + w) * self._phase

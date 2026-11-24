@@ -903,6 +903,8 @@ class Pipeline(QThread):
                     res = ("off", f"desactivada · pasan las {len(goods):,}", "pasan todas")
                 elif state == "skip":
                     res = ("off", "omitida en este equipo", "omitida")
+                elif state == "off":                    # en Windows no existe (usa la IA del Mac): no «✓ N buenas»
+                    res = ("off", f"solo en Mac · pasan las {len(goods):,}", "solo en Mac")
                 else:
                     res = ("ok", f"{len(goods):,} buenas · {n_bad:,} malas (en «{RAW_DIR}/{core.BAD_SUBFOLDER}», "
                                  "con su motivo)", f"{len(goods):,} buenas · {n_bad:,} malas")

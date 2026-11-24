@@ -202,3 +202,38 @@ def fmt(sec: float) -> str:
         return f"{m}:{s:02d}"
     h, m = divmod(m, 60)
     return f"{h} h {m:02d} min"
+
+
+def fmt_est(sec: float) -> str:
+    """Estimaciones y lo que falta, en palabras («25 min», «1 h 05 min»): «25:10» se leía como una hora del día."""
+    sec = max(0.0, float(sec))
+    if sec < 60:
+        return "menos de 1 min"
+    m = int(round(sec / 60.0))
+    if m < 60:
+        return f"{m} min"
+    h, m = divmod(m, 60)
+    return f"{h} h {m:02d} min"
+
+
+def approx(sec: float) -> str:
+    """«≈ 25 min» (o «menos de 1 min», sin el ≈ delante)."""
+    return fmt_est(sec) if sec < 60 else f"≈ {fmt_est(sec)}"
+
+
+_DIAS = ("lun", "mar", "mié", "jue", "vie", "sáb", "dom")
+
+
+def end_phrase(left: float, now: float = None) -> str:
+    """A qué hora termina: «≈ 17:48», «mañana ≈ 10:33» o «el jue ≈ 10:33». Sin «mañana», un evento de 13 h
+    empezado por la noche parecía acabar a las 10:33 de HOY."""
+    import datetime as _dt
+    t0 = _dt.datetime.fromtimestamp(time.time() if now is None else now)
+    end = t0 + _dt.timedelta(seconds=max(0.0, float(left)))
+    days = (end.date() - t0.date()).days
+    hhmm = end.strftime("%H:%M")
+    if days <= 0:
+        return f"≈ {hhmm}"
+    if days == 1:
+        return f"mañana ≈ {hhmm}"
+    return f"el {_DIAS[end.weekday()]} ≈ {hhmm}"

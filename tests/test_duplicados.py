@@ -303,7 +303,36 @@ def funciona_en_windows():
         importlib.reload(P)
         assert P.full_speed() is None
         P.stage_manager(False); P.restore_stage_manager(); P.quit_other_apps(); P.prelaunch("X")
-        assert inputlock.InputLock().lock() is False
+        # Bloqueo de teclado y ratón: en Windows va por rawflow.winlock (o RawFlow.exe --bloqueo), nunca por rfui (Mac).
+        # El proceso se SIMULA: lanzarlo de verdad en un PC con Windows bloqueaba el teclado y el ratón de quien pasaba
+        # las pruebas (23-nov-2026); en el Mac no se notaba porque winlock se niega a arrancar fuera de Windows.
+        import io
+        lanzados = []
+
+        class _Bloqueo:
+            def __init__(self, cmd, *a, **k):
+                lanzados.append([str(x) for x in cmd])
+                self.stdin, self.stdout = io.StringIO(), io.StringIO("ERROR simulado en la prueba\n")
+
+            def poll(self):
+                return 0
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            def wait(self, *a, **k):
+                return 0
+        popen = inputlock.subprocess.Popen
+        inputlock.subprocess.Popen = _Bloqueo
+        try:
+            assert inputlock.InputLock().lock() is False       # sin «BLOCKING» del proceso: no queda bloqueado
+        finally:
+            inputlock.subprocess.Popen = popen
+        assert len(lanzados) == 1 and not any("rfui" in x.lower() for x in lanzados[0]), lanzados
+        assert lanzados[0][-2:] == ["-m", "rawflow.winlock"] or lanzados[0][-1] == "--bloqueo", lanzados
         import subprocess
         real = subprocess.run
         subprocess.run = lambda cmd, *a, **k: (_ for _ in ()).throw(FileNotFoundError(cmd[0])) \

@@ -39,15 +39,15 @@ QMainWindow, #root {{ background: {BG}; }}
 
 #chip {{
     background: {SURFACE_2}; border: 1px solid {BORDER};
-    border-radius: 11px; padding: 3px 10px; color: {MUTED}; font-size: 12px;
+    border-radius: 14px; padding: 3px 12px; color: {MUTED}; font-size: 12px; font-weight: 600;
 }}
 #chipOk {{
     background: rgba(91,228,155,0.10); border: 1px solid rgba(91,228,155,0.35);
-    border-radius: 11px; padding: 3px 10px; color: {OK}; font-size: 12px;
+    border-radius: 14px; padding: 3px 12px; color: {OK}; font-size: 12px; font-weight: 600;
 }}
 #chipWarn {{
     background: rgba(255,107,107,0.10); border: 1px solid rgba(255,107,107,0.35);
-    border-radius: 11px; padding: 3px 10px; color: {DANGER}; font-size: 12px;
+    border-radius: 14px; padding: 3px 12px; color: {DANGER}; font-size: 12px; font-weight: 600;
 }}
 #formatChip {{
     background: rgba(215,255,79,0.08); border: 1px solid rgba(215,255,79,0.30);
@@ -61,6 +61,10 @@ QLineEdit, QDateEdit {{
 }}
 QLineEdit:focus, QDateEdit:focus {{ border: 1px solid {ACCENT}; }}
 QLineEdit::placeholder {{ color: {FAINT}; }}
+QLineEdit#eventName {{ font-size: 17px; font-weight: 500; padding: 11px 14px; border-radius: 12px; }}
+QLineEdit#eventName:hover {{ border-color: {BORDER_HI}; }}
+QLineEdit#eventName:focus {{ border-color: {ACCENT}; }}
+QLineEdit#eventName:disabled {{ color: {MUTED}; background: {SURFACE}; }}
 QDateEdit::drop-down {{ border: none; width: 26px; }}
 QDateEdit::down-arrow {{ image: none; width: 0; }}
 
@@ -88,6 +92,18 @@ QPushButton:disabled {{ color: {FAINT}; }}
 
 #ghost {{ background: transparent; border: none; color: {MUTED}; padding: 4px 6px; }}
 #ghost:hover {{ color: {TEXT}; }}
+
+/* botones de la cabecera: misma pastilla que los chips de estado (alto, radio y borde iguales) */
+#chipButton {{
+    background: {SURFACE_2}; border: 1px solid {BORDER}; border-radius: 14px;
+    padding: 0 12px; color: {MUTED}; font-size: 12px; font-weight: 600;
+}}
+#chipButton:hover {{ border-color: {BORDER_HI}; color: {TEXT}; background: #222631; }}
+#chipButton:pressed {{ background: #1A1D24; }}
+#chipButton[tone="bad"] {{ color: {DANGER}; border-color: rgba(255,107,107,0.45); background: rgba(255,107,107,0.08); }}
+#chipButton[tone="bad"]:hover {{ border-color: rgba(255,107,107,0.7); }}
+#chipButton[tone="accent"] {{ color: {ACCENT}; border-color: rgba(215,255,79,0.45); background: rgba(215,255,79,0.08); }}
+#chipButton[tone="accent"]:hover {{ border-color: {ACCENT}; }}
 #danger {{ background: transparent; border: 1px solid rgba(255,107,107,0.4); color: {DANGER}; }}
 
 QCheckBox {{ color: {MUTED}; spacing: 8px; }}

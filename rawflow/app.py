@@ -21,10 +21,11 @@ from . import theme as T
 from .core import STEP_FINAL, STEP_IMG, STEP_PRES, STEP_RET, STEP_SEL
 from .pipeline import (FINAL_DIR, IMAGEN_DIR, JPEG_SIN_DIR, PRES_DIR, STEPS, TOGGLEABLE, Pipeline, event_root,
                        folders, resume_step)
-from .timing import Estimator, fmt
+from .timing import Estimator, approx, end_phrase, fmt, fmt_est
 from . import anim
-from .widgets import (ActivityView, DriveCard, ElidedLabel, EmptyDrives, RippleButton, SlimProgress, app_icon, font,
-                      hide_from_capture, icon_pixmap_named, set_button_icon, tint_titlebar)
+from .widgets import (ActivityView, DriveCard, ElidedLabel, EmptyDrives, PathLabel, RippleButton, SlimProgress,
+                      StatusLabel, SwitchButton, app_icon, font, hide_from_capture, icon_pixmap_named, set_button_icon,
+                      tint_titlebar)
 
 APP_NAME = "RawFlow"
 IMAGEN_APP = Path("/Applications/ImagenAI.app")
@@ -147,7 +148,7 @@ class Stat(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(2)
         self.value = label("—", "bigNumber")
-        self.value.setFont(font(32, QFont.Weight.Bold))
+        self.value.setFont(font(32, QFont.Weight.Bold, tnum=True))       # al contar, las cifras no bailan
         lay.addWidget(self.value)
         lay.addWidget(label(caption, "bigLabel"))
         self._n, self._fmt = 0.0, None
@@ -205,10 +206,14 @@ class StepPill(QFrame):
               "skip": ("rgba(91,228,155,0.08)", "rgba(91,228,155,0.45)", T.OK),
               "error": ("rgba(255,107,107,0.10)", "rgba(255,107,107,0.5)", T.DANGER)}
 
+    WIDE = 150                                     # más estrecha que esto: sin icono (el texto tiene prioridad)
+    ICON_IDLE = "#5B606B"                          # icono en espera: discreto pero visible (antes casi no se veía)
+
     def __init__(self, n: int, title: str, sub: str):
         super().__init__()
         self.setObjectName("stepPill")
         self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        self.setMinimumHeight(52)                  # con la ventana baja, nombre y carpeta nunca se montan
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 9, 6, 9)
         lay.setSpacing(7)
@@ -219,7 +224,7 @@ class StepPill(QFrame):
         lay.addWidget(self.num)
         txt = QVBoxLayout()
         txt.setSpacing(0)
-        self.title = QLabel(title)
+        self.title = ElidedLabel(title, mode=Qt.TextElideMode.ElideRight)   # estrecha: «Retouc…», no se corta a lo bruto
         self.title.setFont(font(12, QFont.Weight.DemiBold))
         self.sub = ElidedLabel(sub, mode=Qt.TextElideMode.ElideRight)   # si no cabe: «…» (y entero al pasar el ratón)
         self.sub.setFont(font(10.5))
@@ -232,6 +237,8 @@ class StepPill(QFrame):
         lay.addWidget(self.ico)
         lay.addSpacing(4)
         self.sub_text, self.off, self.state, self.note, self.note_state = sub, False, "wait", "", ""
+        self.unavail = ""                          # «Solo en Mac»: el paso no existe en este equipo (siempre apagado)
+        self._pm_ok = False
         self.toggleable = (n - 1) in TOGGLEABLE
         self._hover = False
         bg, border, _ = self.COLORS["wait"]
@@ -265,6 +272,20 @@ class StepPill(QFrame):
         self.double_clicked.emit(int(self.property("n") or 0) - 1)
         e.accept()
 
+    def resizeEvent(self, e):  # noqa: N802
+        super().resizeEvent(e)
+        self.ico.setVisible(self._pm_ok and self.width() >= self.WIDE)
+
+    def set_unavailable(self, text: str, tip: str = ""):
+        """El paso no existe en este equipo (la Selección IA en Windows): apagado siempre, con `text` en vez de
+        «Desactivado», sin tachar y sin invitar al doble clic."""
+        self.unavail = text
+        self.toggleable = False
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        if tip:
+            self.setToolTip(tip)
+        self.set_off(True)
+
     def paintEvent(self, _):  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -281,7 +302,7 @@ class StepPill(QFrame):
 
     def set_off(self, off: bool):
         """Paso desactivado: gris, «–» y «Desactivado» (se ve antes de empezar y durante el proceso)."""
-        self.off = off
+        self.off = off or bool(self.unavail)
         self.set(self.state)
 
     def set_note(self, state: str, text: str):
@@ -311,18 +332,19 @@ class StepPill(QFrame):
         elif self.num.text() in ("✓", "!", "–"):
             self.num.setText(str(self.property("n") or ""))
         note = {"ok": "✓ ", "warn": "! ", "off": "– "}.get(self.note_state, "") + self.note if self.note else ""
-        self.sub.setText("Desactivado" if state == "off" else (note or self.sub_text))
+        self.sub.setText((self.unavail or "Desactivado") if state == "off" else (note or self.sub_text))
         self.num.setStyleSheet(f"background:{border if state not in ('wait', 'off') else T.BORDER}; color:"
                                f"{T.ACCENT_INK if state in ('run', 'done', 'skip') else T.TEXT}; border-radius:10px;")
         self.title.setStyleSheet(f"color:{T.TEXT if state not in ('wait', 'off') else T.MUTED};"
-                                 + (" text-decoration: line-through;" if state == "off" else ""))
+                                 + (" text-decoration: line-through;" if state == "off" and not self.unavail else ""))
         note_col = {"ok": T.OK, "warn": T.DANGER}.get(self.note_state) if self.note and state != "off" else None
         self.sub.setStyleSheet(f"color:{note_col or (fg if state != 'wait' else T.FAINT)};")
-        pm = icon_pixmap_named(self._ico_name, fg if state not in ("wait", "off") else T.BORDER_HI, 18) \
+        pm = icon_pixmap_named(self._ico_name, fg if state not in ("wait", "off") else self.ICON_IDLE, 18) \
             if self._ico_name else None
         if pm is not None:
             self.ico.setPixmap(pm)
-        self.ico.setVisible(pm is not None)
+        self._pm_ok = pm is not None
+        self.ico.setVisible(self._pm_ok and self.width() >= self.WIDE)
         self.update()
 
 
@@ -341,10 +363,10 @@ class TimePanel(QFrame):
         for i, (t, _) in enumerate(STEPS, 1):
             r = QHBoxLayout()
             r.setContentsMargins(0, 7, 0, 7)
-            name = QLabel(f"{i}   {t}")
-            name.setFont(font(13, QFont.Weight.DemiBold))
+            name = QLabel(f"<span style='color:{T.FAINT}'>{i}</span>&nbsp;&nbsp;&nbsp;{t}")   # número atenuado
+            name.setFont(font(13, QFont.Weight.DemiBold, tnum=True))
             val = QLabel("—")
-            val.setFont(font(13, mono=True))
+            val.setFont(font(13, QFont.Weight.Medium, tnum=True))      # misma letra que el resto, cifras alineadas
             val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             r.addWidget(name, 1)
             r.addWidget(val)
@@ -377,27 +399,31 @@ class TimePanel(QFrame):
         self.t0 = 0.0
         self.frac = -1.0
         self.off: set = set()
+        self.unavailable: Dict[int, str] = {}       # pasos que no existen en este equipo: {paso: «solo en Mac»}
 
     def _style(self, i: int, state: str):
         name, val = self.rows[i]
         col = {"wait": T.MUTED, "run": T.ACCENT, "done": T.OK, "error": T.DANGER, "off": T.FAINT}[state]
-        name.setStyleSheet(f"color:{T.TEXT if state != 'wait' else T.MUTED};")
+        # apagado: atenuado (antes salía en blanco, más visible que los pasos que sí se van a hacer)
+        name.setStyleSheet(f"color:{ {'wait': T.MUTED, 'off': T.FAINT}.get(state, T.TEXT) };")
         val.setStyleSheet(f"color:{col};")
 
     def show_estimate(self, est: List[float]):
         self.title.setText("TIEMPO ESTIMADO")
         self.est = list(est)
         for i, e in enumerate(est):
-            if i in self.off and i != STEP_IMG:           # Imagen desactivado aún tiene Bridge: su tiempo cuenta
+            if i in self.unavailable:
+                self.rows[i][1].setText(self.unavailable[i])
+                self._style(i, "off")
+            elif i in self.off and i != STEP_IMG:         # Imagen desactivado aún tiene Bridge: su tiempo cuenta
                 self.rows[i][1].setText("desactivado")
                 self._style(i, "off")
             else:
-                self.rows[i][1].setText(f"≈ {fmt(e)}" + ("  · solo Bridge" if i in self.off else ""))
+                self.rows[i][1].setText(approx(e) + ("  · solo Bridge" if i in self.off else ""))
                 self._style(i, "wait")
         self.total_name.setText("Total")
-        self.total.setText(f"≈ {fmt(sum(est))}")
-        end = time.localtime(time.time() + sum(est))
-        self.foot.setText(f"Si empiezas ahora, termina ≈ {time.strftime('%H:%M', end)}")
+        self.total.setText(approx(sum(est)))
+        self.foot.setText(f"Si empiezas ahora, termina {end_phrase(sum(est))}")
 
     def begin_run(self, est: List[float], start_at: int):
         self.title.setText("TIEMPO DEL PROCESO")
@@ -405,8 +431,15 @@ class TimePanel(QFrame):
         self.dur = [0.0 if i < start_at else None for i in range(len(STEPS))]
         self.cur, self.t0, self.frac = -1, time.monotonic(), -1.0
         for i in range(len(STEPS)):
-            self._style(i, "done" if i < start_at else "wait")
-            self.rows[i][1].setText("—" if i < start_at else f"≈ {fmt(est[i])}")
+            if i in self.unavailable:
+                self._style(i, "off")
+                self.rows[i][1].setText(self.unavailable[i])
+            elif i >= start_at and i in self.off and i != STEP_IMG:
+                self._style(i, "off")
+                self.rows[i][1].setText("desactivado")
+            else:
+                self._style(i, "done" if i < start_at else "wait")
+                self.rows[i][1].setText("—" if i < start_at else approx(est[i]))
         self.tick()
 
     def step(self, i: int, state: str):
@@ -418,7 +451,8 @@ class TimePanel(QFrame):
         elif state == "off":
             self.dur[i] = (now - self.start[i]) if self.start[i] else 0.0
             self._style(i, "off")
-            self.rows[i][1].setText("desactivado" + (f"  · {fmt(self.dur[i])}" if self.dur[i] >= 1 else ""))
+            self.rows[i][1].setText(self.unavailable.get(i) or
+                                    ("desactivado" + (f"  · {fmt(self.dur[i])}" if self.dur[i] >= 1 else "")))
             if i == self.cur:
                 self.cur = -1
         elif state in ("done", "skip", "error") and self.start[i]:
@@ -454,15 +488,15 @@ class TimePanel(QFrame):
         if self.cur >= 0:
             el = time.monotonic() - self.start[self.cur]
             rem = self.remaining_current()
-            self.rows[self.cur][1].setText(f"{fmt(el)}  ·  faltan {fmt(rem)}" if rem > 1 else f"{fmt(el)}  ·  casi")
+            self.rows[self.cur][1].setText(f"{fmt(el)}  ·  faltan {fmt_est(rem)}" if rem > 1 else f"{fmt(el)}  ·  casi")
         left = self.remaining_current() + sum(self.est[j] for j in range(len(STEPS))
                                               if self.dur[j] is None and j != self.cur)
         if self.t0:
             el_total = time.monotonic() - self.t0
-            self.total_name.setText(f"Total  {fmt(el_total)}")
-            self.total.setText(f"faltan {fmt(left)}" if left > 1 else "terminando…")
-            end = time.localtime(time.time() + left)
-            self.foot.setText(f"Termina ≈ {time.strftime('%H:%M', end)}")
+            self.total_name.setText(f"Total&nbsp;&nbsp;<span style='color:{T.MUTED}; font-weight:500'>"
+                                    f"{fmt(el_total)}</span>")
+            self.total.setText(f"faltan {fmt_est(left)}" if left > 1 else "terminando…")
+            self.foot.setText(f"Termina {end_phrase(left)}")
 
     def finish(self, ok: bool):
         el = time.monotonic() - self.t0 if self.t0 else 0
@@ -573,30 +607,28 @@ class MainWindow(QMainWindow):
         dot.setStyleSheet(f"background:{T.ACCENT}; border-radius:6px;")
         word = label("RAWFLOW", "wordmark")
         word.setFont(font(21, QFont.Weight.ExtraBold))
+        head.setSpacing(8)                         # (sin esto heredaba los 18 px de la ventana: todo muy separado)
         head.addWidget(dot)
-        head.addSpacing(10)
+        head.addSpacing(4)                         # el punto va pegado a la marca: es parte del logotipo
         head.addWidget(word)
         from . import __version__
         ver = label(f"v{__version__}", "faint")
         ver.setFont(font(11, QFont.Weight.DemiBold))
         ver.setStyleSheet(f"color:{T.MUTED}; border:1px solid {T.BORDER}; border-radius:7px; padding:1px 6px;")
-        head.addSpacing(8)
+        head.addSpacing(2)
         head.addWidget(ver, 0, Qt.AlignmentFlag.AlignVCenter)
         head.addSpacing(16)
         head.addStretch(1)
-        self.btn_update = QPushButton("", objectName="ghost")     # aparece solo si hay una versión nueva en GitHub
+        # a la derecha, todo con la misma pastilla (28 px de alto): estado, interruptor y botones secundarios
+        self.btn_update = QPushButton("", objectName="chipButton")   # aparece solo si hay una versión nueva en GitHub
+        self.btn_update.setProperty("tone", "accent")
         self.btn_update.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_update.setStyleSheet(f"color:{T.ACCENT}; font-weight:600;")
         self.btn_update.clicked.connect(self._update_now)
         self.btn_update.hide()
         head.addWidget(self.btn_update)
-        head.addSpacing(6)
         self.ready_chip = label("", "chip")
         head.addWidget(self.ready_chip)
-        head.addSpacing(6)
-        self.btn_auto = QPushButton("")
-        self.btn_auto.setCheckable(True)
-        self.btn_auto.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_auto = SwitchButton("Autoejecutar")
         self.btn_auto.setToolTip("Al conectar una memoria con RAW, RawFlow empieza sola (con cuenta atrás de 3 s).")
         self.btn_auto.setChecked(self.settings.value("autorun", True, type=bool))
         if os.environ.get("RAWFLOW_AUTOEJECUTAR") == "1":      # prueba: encendido en este arranque (no se guarda)
@@ -604,12 +636,12 @@ class MainWindow(QMainWindow):
         self.btn_auto.toggled.connect(self._auto_toggled)
         self._auto_style()
         head.addWidget(self.btn_auto)
-        self.btn_perms = QPushButton("Permisos", objectName="ghost")
+        self.btn_perms = QPushButton("Permisos", objectName="chipButton")
         self.btn_perms.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_perms.clicked.connect(self._show_permissions)
         self.btn_perms.setVisible(core.SYSTEM == "Darwin")
         head.addWidget(self.btn_perms)
-        self.btn_vm = QPushButton("Instalar máquina virtual", objectName="ghost")   # secundario: el lima es de «Empezar»
+        self.btn_vm = QPushButton("Instalar máquina virtual", objectName="chipButton")   # secundario: el lima es de «Empezar»
         self.btn_vm.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_vm.clicked.connect(self._install_vm)
         self.btn_vm.setVisible(core.SYSTEM == "Darwin")
@@ -617,11 +649,13 @@ class MainWindow(QMainWindow):
             b.setMinimumWidth(b.sizeHint().width())
         head.addWidget(self.btn_vm)
         # Windows: Imagen AI va con clave API (en Mac se maneja su app); aquí se escribe y se elige el perfil
-        self.btn_imagen = QPushButton("Imagen AI", objectName="ghost")
+        self.btn_imagen = QPushButton("Imagen AI", objectName="chipButton")
         self.btn_imagen.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_imagen.clicked.connect(self._config_imagen)
         self.btn_imagen.setVisible(core.SYSTEM != "Darwin")
         head.addWidget(self.btn_imagen)
+        for w in (self.btn_update, self.ready_chip, self.btn_auto, self.btn_perms, self.btn_vm, self.btn_imagen):
+            w.setFixedHeight(28)
         outer.addLayout(head)
 
         body = QHBoxLayout()
@@ -655,7 +689,7 @@ class MainWindow(QMainWindow):
         self.cards_scroll.setWidget(holder)
         self.cards_scroll.hide()
         ll.addWidget(self.cards_scroll, 1)
-        self.cards_hint = label("Toca una tarjeta para incluirla o excluirla.", "faint")
+        self.cards_hint = label("Haz clic en una tarjeta para incluirla o excluirla.", "faint")
         ll.addWidget(self.cards_hint)
         self.time_sep = QFrame()
         self.time_sep.setFixedHeight(1)
@@ -683,6 +717,7 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.setSpacing(12)
         self.name_edit = QLineEdit(core.date_name() + " ")
+        self.name_edit.setObjectName("eventName")   # el título del trabajo: más grande que un campo cualquiera
         self.name_edit.setAcceptDrops(False)        # soltar una carpeta encima no escribe su ruta en el nombre
         self.auto_name = core.date_name()          # se actualiza solo si cambia el día y no lo editaste
         self.name_edit.setPlaceholderText(core.date_name())
@@ -695,19 +730,27 @@ class MainWindow(QMainWindow):
         el.addLayout(row)
         drow = QHBoxLayout()
         drow.setSpacing(8)
-        drow.addWidget(label("→", "faint"))
-        self.dest_label = ElidedLabel()
-        self.dest_label.setObjectName("pathLabel")
-        self.dest_label.setFont(font(12.5, mono=True))
+        drow.setContentsMargins(2, 2, 0, 0)
+        fic = QLabel()
+        fic.setFixedWidth(17)
+        fic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pm = icon_pixmap_named("ph.folder-simple", T.FAINT, 15)
+        if pm is not None:
+            fic.setPixmap(pm)
+        else:
+            fic.setText("→")
+        drow.addWidget(fic)
+        self.dest_label = PathLabel()               # …\Escritorio\ atenuado + «23 nov 2026 Boda» resaltado
         drow.addWidget(self.dest_label, 1)
         b = QPushButton("Cambiar", objectName="ghost")
         set_button_icon(b, "ph.folder-open", T.MUTED)
+        b.setToolTip("Elegir dónde se crea la carpeta del evento (se recuerda para los próximos)")
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         b.clicked.connect(self._choose_base)
         drow.addWidget(b)
         el.addLayout(drow)
-        self.tree = label("", "faint")
-        self.tree.setFont(font(11.5, mono=True))
+        self.tree = label("", "faint")              # las carpetas que se crean dentro
+        self.tree.setContentsMargins(2 + 17 + 8, 0, 0, 0)   # alineado con la ruta: margen + icono + separación
         el.addWidget(self.tree)
         right.addWidget(ev)
 
@@ -747,24 +790,33 @@ class MainWindow(QMainWindow):
             p.set_off(i - 1 in self.steps_off)
             self.pills.append(p)
             steps.addWidget(p, 1)
+        if core.SYSTEM != "Darwin":                # la Selección IA usa la IA del Mac: aquí se dice, no «≈ 0 s»
+            self.pills[STEP_SEL].set_unavailable("Solo en Mac", "La Selección IA usa la IA del Mac: en este equipo "
+                                                               "todas las fotos pasan a DxO.")
+            self.timepanel.unavailable = {STEP_SEL: "solo en Mac"}
         al.addLayout(steps)
         self.progress = SlimProgress()
         al.addWidget(self.progress)
-        self.status = ElidedLabel("Conecta una memoria o arrastra una carpeta de fotos para empezar.")
+        self.status = StatusLabel("Conecta una memoria o arrastra una carpeta de fotos para empezar.")
         self.status.setObjectName("muted")
+        self.status.setFont(font(13, QFont.Weight.Medium))
         self.status.fade_changes = True            # cada mensaje nuevo entra con un fundido corto
         al.addWidget(self.status)
-        self.detail = ElidedLabel("")
+        self.detail = ElidedLabel("", mode=Qt.TextElideMode.ElideRight)
         self.detail.setStyleSheet(f"color:{T.ACCENT}; font-weight:600;")
-        self.detail.setFont(font(12, mono=True))
+        self.detail.setFont(font(12.5, QFont.Weight.DemiBold, tnum=True))
         al.addWidget(self.detail)
 
-        al.addSpacing(6)
+        al.addSpacing(8)
         self.activity = ActivityView()             # lo que RawFlow va haciendo; llena el hueco y deja «Empezar» abajo
         al.addWidget(self.activity, 1)
         al.addSpacing(4)
         brow = QHBoxLayout()
         brow.setSpacing(10)
+        self.run_spacer = QWidget()                # durante el proceso: «Cancelar» compacto a la derecha, no a lo ancho
+        self.run_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.run_spacer.hide()
+        brow.addWidget(self.run_spacer, 1)
         self.go = RippleButton("Empezar", objectName="primary")      # con onda al pulsar
         self.go.setCursor(Qt.CursorShape.PointingHandCursor)
         self.go.setMinimumHeight(56)
@@ -786,6 +838,7 @@ class MainWindow(QMainWindow):
         self.cancel = QPushButton("Cancelar", objectName="danger")
         set_button_icon(self.cancel, "ph.x", T.DANGER, 15)
         self.cancel.setMinimumHeight(56)
+        self.cancel.setMinimumWidth(150)
         self.cancel.clicked.connect(self._cancel)
         self.cancel.hide()
         brow.addWidget(self.cancel)
@@ -911,9 +964,13 @@ class MainWindow(QMainWindow):
         from . import imagen, imagen_win
         key = bool(imagen.get_api_key())
         app = imagen_win.available() and imagen_win.bridge_path() is not None
-        self.btn_imagen.setText("Imagen AI  ✓  clave API" if key else "Imagen AI  ✓  con su app" if app
-                                else "Imagen AI: falta")
-        self.btn_imagen.setStyleSheet("" if (key or app) else f"color:{T.DANGER};")
+        self.btn_imagen.setText("Imagen AI · clave API" if key else "Imagen AI · con su app" if app
+                                else "Imagen AI · falta")
+        set_button_icon(self.btn_imagen, "ph.check-circle" if (key or app) else "ph.warning-circle",
+                        T.OK if (key or app) else T.DANGER, 15)
+        self.btn_imagen.setProperty("tone", "" if (key or app) else "bad")
+        self.btn_imagen.style().unpolish(self.btn_imagen)
+        self.btn_imagen.style().polish(self.btn_imagen)
         self.btn_imagen.setToolTip(
             "Imagen AI con tu clave API. Pulsa para cambiar la clave, el perfil o el tipo de fotografía." if key else
             "Imagen AI con su app (ImagenAI, con tu sesión iniciada) y Adobe Bridge: RawFlow las maneja por ti.\n"
@@ -952,7 +1009,20 @@ class MainWindow(QMainWindow):
             self.showing_result = False
         self._update_summary()
 
+    def _clear_result(self):
+        """Llega otra memoria o carpeta: lo del evento anterior (pasos en verde con lo comprobado, barra llena, el
+        detalle de sus carpetas) se va, para que no parezca del evento nuevo."""
+        if not getattr(self, "_result_shown", False):
+            return
+        self._result_shown = False
+        for p in self.pills:
+            p.set_note("", "")
+            p.set("wait")
+        self.progress.setValue(0.0, animate=False)
+        self.detail.setText("")
+
     def _add_drive(self, d: core.Drive):
+        self._clear_result()
         card = DriveCard(d)
         card.toggled.connect(lambda *_: self._update_summary())
         self.cards[d.key] = card
@@ -1019,6 +1089,7 @@ class MainWindow(QMainWindow):
             while self.fmt_row.count() > 1:
                 it = self.fmt_row.takeAt(0)
                 if it.widget():
+                    it.widget().hide()                     # fuera ya: no se queda pintada hasta que Qt la borre
                     it.widget().deleteLater()
             for k, (ext, n) in enumerate(fmts):
                 chip = label(f"{ext}  {n:,}", "formatChip")
@@ -1070,15 +1141,9 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ autoejecutar
     def _auto_style(self):
+        # interruptor (estado), no un botón de acción: lo dibuja SwitchButton; el único relleno en lima es «Empezar»
         on = self.btn_auto.isChecked()
-        # interruptor (estado), no un botón de acción: el único relleno en lima es «Empezar»
-        self.btn_auto.setText("●  Autoejecutar: sí" if on else "○  Autoejecutar: no")
-        self.btn_auto.setMinimumWidth(self.btn_auto.fontMetrics().horizontalAdvance(self.btn_auto.text()) + 34)
-        self.btn_auto.setStyleSheet(
-            f"color:{T.ACCENT}; background:rgba(215,255,79,0.08); border:1px solid rgba(215,255,79,0.45);"
-            f" font-weight:600; border-radius:13px; padding:5px 14px;" if on
-            else f"color:{T.MUTED}; background:transparent; border:1px solid {T.BORDER}; border-radius:13px;"
-                 f" padding:5px 14px;")
+        self.btn_auto.setAccessibleName("Autoejecutar: " + ("sí" if on else "no"))
 
     def _auto_toggled(self, on: bool):
         self.settings.setValue("autorun", on)
@@ -1161,8 +1226,9 @@ class MainWindow(QMainWindow):
     def _update_dest(self, *_):
         d = self._dest()
         self.dest_label.setText(str(d))
-        self.tree.setText(f"{d.name}/   {core.RAW_SUBFOLDER} · {core.OUTPUT_SUBFOLDER} · "
-                          f"{IMAGEN_DIR if STEP_IMG not in self.steps_off else JPEG_SIN_DIR} · {FINAL_DIR} · {PRES_DIR}")
+        self.tree.setText("Dentro:   " + "   ·   ".join(
+            (core.RAW_SUBFOLDER, core.OUTPUT_SUBFOLDER, IMAGEN_DIR if STEP_IMG not in self.steps_off else JPEG_SIN_DIR,
+             FINAL_DIR, PRES_DIR)))
 
     def _choose_base(self):
         d = QFileDialog.getExistingDirectory(self, "¿Dónde crear la carpeta del evento?", self.base_dir)
@@ -1307,6 +1373,8 @@ class MainWindow(QMainWindow):
             self._update_dest()                          # «3 Imagen AI» o «3 JPEG sin Imagen» en la vista previa
         self._log(f"Paso {i + 1} ({STEPS[i][0]}): {'desactivado' if i in self.steps_off else 'activado'} con doble clic")
         self._update_summary()
+        if i == STEP_SEL and core.SYSTEM != "Darwin":    # aquí no existe: se recuerda igual, pero se dice la verdad
+            msg = "La Selección IA solo funciona en Mac: en este equipo todas las fotos pasan a DxO."
         self.status.setText(msg)
 
     def _apply_off(self, est: List[float], n: int) -> List[float]:
@@ -1474,6 +1542,7 @@ class MainWindow(QMainWindow):
         self._run_tick()
         for w in (self.go, self.retry, self.open_btn):
             w.hide()
+        self.run_spacer.show()
         self.cancel.show()
         self.name_edit.setEnabled(False)
         self.detail.setText("")
@@ -1602,9 +1671,8 @@ class MainWindow(QMainWindow):
         tp = self.timepanel
         el = time.monotonic() - tp.t0 if tp.t0 else 0.0
         left = tp.left_seconds()
-        end = time.strftime("termina ≈ %H:%M", time.localtime(time.time() + left))
         self.runscreen.set_times([v.text() for _, v in tp.rows], fmt(el),
-                                 f"faltan {fmt(left)}" if left > 1 else "terminando…", end,
+                                 f"faltan {fmt_est(left)}" if left > 1 else "terminando…", f"termina {end_phrase(left)}",
                                  el / (el + left) if el + left > 0 else 0.0)
 
     LOW_POWER_TXT = "Modo de bajo consumo activado: todo va más lento  ·  desactívalo en Ajustes del Sistema → Batería"
@@ -1719,7 +1787,9 @@ class MainWindow(QMainWindow):
         self.curtain.mirror(None)
         self._pin(False)
         self.cancel.hide()
+        self.run_spacer.hide()
         self.go.show()
+        self._result_shown = True                  # se ve hasta que llegue otra memoria o carpeta (_clear_result)
         self.name_edit.setEnabled(True)
         self.open_btn.show()
         self.progress.setIndeterminate(False)

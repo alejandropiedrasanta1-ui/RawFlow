@@ -248,11 +248,11 @@ class RunScreen(QWidget):
         p.end()
         return pm
 
-    def _f(self, size, weight=QFont.Weight.Normal, mono=False, spacing=0.0) -> QFont:
-        k = (round(size), weight, mono, spacing)
+    def _f(self, size, weight=QFont.Weight.Normal, mono=False, spacing=0.0, tnum=False) -> QFont:
+        k = (round(size), weight, mono, spacing, tnum)
         f = self._fonts.get(k)
         if f is None:
-            f = font(size, weight, mono)
+            f = font(size, weight, mono, tnum=tnum)
             if spacing:
                 f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
             self._fonts[k] = f
@@ -628,7 +628,7 @@ class RunScreen(QWidget):
             p.setFont(self._f(16, QFont.Weight.Bold))
             p.drawText(QRectF(x - 110, y + 30, 220, 24), Qt.AlignmentFlag.AlignCenter, title)
             p.setPen(QColor({"run": T.ACCENT, "done": T.OK, "skip": T.OK, "error": T.DANGER}.get(st, T.FAINT)))
-            p.setFont(self._f(13, mono=True))
+            p.setFont(self._f(13, QFont.Weight.Medium, tnum=True))     # como en la ventana (antes, letra de terminal)
             p.drawText(QRectF(x - 110, y + 54, 220, 20), Qt.AlignmentFlag.AlignCenter,
                        "Desactivado" if st == "off" and not (i < len(self.times) and self.times[i])
                        else (self.times[i] if i < len(self.times) and self.times[i] else sub))
