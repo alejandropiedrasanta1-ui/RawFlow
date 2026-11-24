@@ -34,7 +34,7 @@ EMBED = "mobilenet_v3_large.tflite"
 PREVIEW = 1600           # lado mayor de la imagen donde se buscan las caras (como la vista previa de rfui)
 BACK = 4                 # parecido con las 4 tomas anteriores (como CULL_BACK en rfui)
 DET_SCORE = 0.6          # confianza mínima de una cara
-RESCUE_SCORE = 0.35      # …al volver a buscarla en su sitio (zona pequeña, ampliada)
+RESCUE_SCORE = 0.35     # …al volver a buscarla en su sitio (zona pequeña, ampliada)
 
 # ojo: índices del contorno de los párpados en la malla (ojo derecho e izquierdo de la persona)
 EYE_R = (33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246)
@@ -406,6 +406,8 @@ class Engine:
             o[key] = g.get(key, -1.0)
         sx, sy = W / img.shape[1], H / img.shape[0]
         caras = []
+        # (Probado el 24-nov-2026: buscar también con la foto girada 90° cuando no sale ninguna cara encuentra a alguien
+        # tumbado, pero de 6 «caras» aceptadas en 3 eventos 5 eran flores, andamios o manos: no se usa.)
         for (x, y, w, h, er, el, sc) in self.detect(img):
             box = (x * sx, y * sy, w * sx, h * sy)
             d = self.measure(big, box, ((er[0] * sx, er[1] * sy), (el[0] * sx, el[1] * sy)))

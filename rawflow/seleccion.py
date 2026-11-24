@@ -656,6 +656,46 @@ def kept_restored(raw_dir: Path) -> set:
     return {n for n in names if (Path(raw_dir) / n).exists() or (Path(raw_dir) / GOOD_NAME / n).exists()}
 
 
+def bad_photos(raw_dir: Path) -> List[tuple]:
+    """[(ruta, motivo)] de las fotos que siguen en «1 Original/Fotos malas», en orden de nombre (el de la toma)."""
+    from . import core
+    bad = Path(raw_dir) / DIR_NAME
+    if not bad.is_dir():
+        return []
+    why: Dict[str, str] = {}
+    f = bad / REASONS_FILE
+    if f.exists():
+        for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+            if "\t" in line:
+                n, w = line.split("\t", 1)
+                why[n] = w
+    fotos = sorted(q for q in bad.iterdir() if q.is_file() and q.suffix.lower() in core.RAW_EXTENSIONS
+                   and not q.name.startswith("."))
+    return [(q, why.get(q.name, "")) for q in fotos]
+
+
+def restore(raw_dir: Path, names: List[str]) -> int:
+    """Devuelve a «Fotos buenas» las fotos elegidas de «Fotos malas» (con su .xmp). Su línea en «motivos.txt» se queda:
+    así kept_restored() sabe que tú la recuperaste y nunca se vuelve a apartar. Devuelve cuántas movió."""
+    raw_dir = Path(raw_dir)
+    bad, good = raw_dir / DIR_NAME, raw_dir / GOOD_NAME
+    good.mkdir(exist_ok=True)
+    n = 0
+    for name in names:
+        src = bad / name
+        if not src.is_file():
+            continue
+        target = good / name
+        if target.exists():                              # (no debería: la misma foto en buenas y en malas)
+            continue
+        os.replace(src, target)
+        n += 1
+        for side in (src.with_suffix(".xmp"), src.with_suffix(".XMP")):
+            if side.exists():
+                os.replace(side, good / side.name)
+    return n
+
+
 def move_rest_to_good(raw_dir: Path) -> int:
     """Las fotos que quedan sueltas en «1 Original» (las buenas) → «1 Original/Fotos buenas» (con su .xmp, si tenían).
     Mismo disco: instantáneo. Devuelve cuántas movió."""

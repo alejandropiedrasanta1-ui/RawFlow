@@ -450,6 +450,45 @@ def seleccion_fallida_desenfocada():
 
 
 @caso
+def fotos_malas_recuperar():
+    """Ventana «Fotos malas»: lista lo apartado con su motivo; recuperar pasa la foto (y su .xmp) a «Fotos buenas» y
+    desde entonces la Selección IA no la vuelve a apartar."""
+    from rawflow import seleccion as S
+    raw = fresh("malas_evento") / core.RAW_SUBFOLDER
+    raw.mkdir(parents=True)
+    for n in ("A.ARW", "B.ARW", "C.ARW"):
+        write(raw / n, n.encode() * 100)
+    write(raw / "B.xmp", b"<x/>")
+    S.apply(raw, {"A.ARW": "toma negra (tapa puesta)", "B.ARW": "repetida: se queda C (la mejor de las dos)"})
+    fotos = S.bad_photos(raw)
+    assert [(p.name, w[:10]) for p, w in fotos] == [("A.ARW", "toma negra"), ("B.ARW", "repetida: ")], fotos
+    assert S.restore(raw, ["B.ARW", "NO.ARW"]) == 1
+    good = raw / core.GOOD_SUBFOLDER
+    assert (good / "B.ARW").exists() and (good / "B.xmp").exists() and not (raw / core.BAD_SUBFOLDER / "B.ARW").exists()
+    assert [p.name for p, _ in S.bad_photos(raw)] == ["A.ARW"]
+    assert "B.ARW" in S.kept_restored(raw), "recuperada: nunca se vuelve a apartar"
+
+
+@caso
+def banco_descarte():
+    """Las REGLAS con 5 eventos reales guardados (tools/calibrar/banco.py). Si esto cambia, mirar a ojo las fotos que
+    cambian y actualizar las cifras a propósito. Boda 14 nov: las únicas «buenas» (según otra IA) que se apartan
+    están revisadas (DSC02626 sin flash, DSC02628 ojos cerrados; las demás, repetidas de la misma pose)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "calibrar"))
+    import banco
+    ref = {"20nov_480": 45, "boda14nov_1604": 71, "jutiapa_597": 103, "xv15nov_376_win": 49, "xv8nov_516_win": 102}
+    vistas = {}
+    for f in sorted(banco.DATOS.glob("*.jsonl")):
+        e = banco.evaluar(banco.cargar(f))
+        vistas[f.stem] = e
+        assert e["apartadas"] == ref.get(f.stem), (f.stem, e["apartadas"], e["resumen"])
+    assert set(vistas) == set(ref), sorted(vistas)
+    b = vistas["boda14nov_1604"]["buenas"]
+    sueltas = {k for k, v in b.items() if not v.startswith("repetida")}
+    assert sueltas == {"DSC02626.ARW", "DSC02628.ARW"} and len(b) == 14, sorted(b)
+
+
+@caso
 def motor_retouch_cadena_igual_a_arams():
     """El paso 4 sin ventana manda al motor EXACTAMENTE la misma cadena que Arams (mismo orden, mismos valores)."""
     from rawflow import retouch_engine as r

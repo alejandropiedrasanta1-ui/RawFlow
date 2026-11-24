@@ -29,7 +29,7 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
-      - name: Compilar RawFlow.exe y su instalador
+      - name: Compilar RawFlow.exe y su instalador (antes pasa las pruebas; si alguna falla, no se compila)
         shell: pwsh
         env:
           RAWFLOW_PYTHON: python

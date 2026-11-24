@@ -35,6 +35,19 @@ foreach ($m in 'face_detection_yunet_2023mar.onnx', 'face_landmarker.task', 'mob
     if (-not (Test-Path "rawflow\modelos\$m")) { throw "Falta el modelo de la Selección IA: rawflow\modelos\$m (ver rawflow\modelos\LEEME.txt)" }
 }
 
+Paso 'Pruebas (si alguna falla, no se compila)...'
+# Como en build_mac.sh. Simulan DxO, Imagen, Bridge y Retouch4me (RAWFLOW_SIN_APPS): no tocan programas ni fotos
+# reales y pasan también sin esos programas instalados (como en el servidor de GitHub). Las solo-Mac salen «saltadas».
+$qpa = $env:QT_QPA_PLATFORM
+$env:QT_QPA_PLATFORM = 'offscreen'
+$fallo = $false
+foreach ($t in 'tests\test_duplicados.py', 'tests\pruebas_rawflow.py') {
+    & $vpy $t
+    if ($LASTEXITCODE -ne 0) { $fallo = $true }
+}
+$env:QT_QPA_PLATFORM = $qpa
+if ($fallo) { throw 'PRUEBAS FALLIDAS: no se compila' }
+
 Paso 'Icono (todos los tamaños) e imágenes del instalador...'
 & $vpy tools\hacer_icono.py
 if ($LASTEXITCODE -ne 0) { throw 'No se pudo generar el icono' }

@@ -852,6 +852,12 @@ class MainWindow(QMainWindow):
         self.open_btn.clicked.connect(lambda: self.last_event and core.reveal_in_file_manager(self.last_event))
         self.open_btn.hide()
         brow.addWidget(self.open_btn)
+        self.bad_btn = QPushButton("Fotos malas")               # ver lo que apartó la Selección IA y recuperar
+        set_button_icon(self.bad_btn, "ph.image", T.TEXT, 16)
+        self.bad_btn.setMinimumHeight(56)
+        self.bad_btn.clicked.connect(self._review_bad)
+        self.bad_btn.hide()
+        brow.addWidget(self.bad_btn)
         self.cancel = QPushButton("Cancelar", objectName="danger")
         set_button_icon(self.cancel, "ph.x", T.DANGER, 15)
         self.cancel.setMinimumHeight(56)
@@ -1358,7 +1364,34 @@ class MainWindow(QMainWindow):
             self.status.setText(f"«{ev.name}» está terminado. «Revisar» comprueba foto a foto que todo lleve Imagen "
                                 "y rehace solo lo que no esté bien.")
         self.retry.show()
+        self._show_bad_btn(ev)
         self._log(f"Evento arrastrado: {ev} → paso {step + 1}" + (f" (falta {falta})" if falta else " (revisar)"))
+
+    # ------------------------------------------------------------ fotos malas (Selección IA)
+    def _show_bad_btn(self, ev: Path):
+        from . import seleccion
+        try:
+            n = len(seleccion.bad_photos(Path(ev) / core.RAW_SUBFOLDER))
+        except OSError:
+            n = 0
+        self.bad_btn.setText(f"Fotos malas ({n})")
+        self.bad_btn.setVisible(n > 0)
+
+    def _review_bad(self):
+        """Ventana con lo apartado; si recuperas alguna, «Seguir» la procesa desde la Selección IA (solo esas)."""
+        if not self.last_event:
+            return
+        from .malas_dialog import MalasDialog
+        dlg = MalasDialog(Path(self.last_event), self)
+        dlg.exec()
+        self._show_bad_btn(Path(self.last_event))
+        if dlg.restored:
+            self.failed_step = STEP_SEL
+            self.retry.setText(f"Procesar {dlg.restored} recuperada{'s' if dlg.restored != 1 else ''}")
+            self.retry.show()
+            self.status.setText(f"{dlg.restored} foto(s) recuperada(s) en «1 Original/Fotos buenas». Pulsa «Procesar» "
+                                "y pasan por DxO, Imagen y Retouch4me (solo esas); no se vuelven a apartar.")
+            self._log(f"Fotos malas: {dlg.restored} recuperada(s) en «{self.last_event}»")
 
     # ------------------------------------------------------------ pasos activados / desactivados (doble clic)
     def _load_steps_off(self) -> set:
@@ -1621,7 +1654,7 @@ class MainWindow(QMainWindow):
         self.sampler.start()
         self.power_timer.start()
         self._run_tick()
-        for w in (self.go, self.retry, self.open_btn):
+        for w in (self.go, self.retry, self.open_btn, self.bad_btn):
             w.hide()
         self.run_spacer.show()
         self.cancel.show()
@@ -1878,6 +1911,7 @@ class MainWindow(QMainWindow):
         self._result_shown = True                  # se ve hasta que llegue otra memoria o carpeta (_clear_result)
         self.name_edit.setEnabled(True)
         self.open_btn.show()
+        self._show_bad_btn(Path(event))
         self.progress.setIndeterminate(False)
         ev = Path(event)
         self._remember_pending(ev, summary.get("failed_step", 0) if err else None)
