@@ -8,5 +8,8 @@ winrt-Windows.Globalization>=3.2; sys_platform == "win32"
 winrt-Windows.Graphics.Imaging>=3.2; sys_platform == "win32"
 winrt-Windows.Media.Ocr>=3.2; sys_platform == "win32"
 winrt-Windows.Storage.Streams>=3.2; sys_platform == "win32"
+# Windows: Selección IA (caras, ojos y parecido entre tomas con OpenCV; en el Mac lo hace la IA de Apple)
+numpy>=2.3; sys_platform == "win32"
+opencv-python-headless>=4.10; sys_platform == "win32"
 # Iconos (colección Phosphor) para pasos y botones
 qtawesome>=1.4

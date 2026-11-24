@@ -71,8 +71,11 @@ say('READY', secs(t0));
 
 let stopped = false;
 const PARENT = process.ppid;                 // si RawFlow se cierra, el motor no sigue trabajando solo
+// (en Windows el «padre» de un proceso no cambia aunque muera: hay que preguntar si sigue vivo; sin esto, si RawFlow
+// se cerraba de golpe, el motor seguía horas con la tarjeta gráfica)
+const parentAlive = () => { try { process.kill(PARENT, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
 const stopNow = () => {
-  if (process.ppid !== PARENT) return true;
+  if (process.ppid !== PARENT || !parentAlive()) return true;
   try { return !!job.stopFile && fs.existsSync(job.stopFile); } catch (e) { return false; }
 };
 

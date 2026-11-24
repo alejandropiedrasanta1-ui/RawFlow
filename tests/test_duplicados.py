@@ -303,9 +303,9 @@ def funciona_en_windows():
         importlib.reload(P)
         assert P.full_speed() is None
         P.stage_manager(False); P.restore_stage_manager(); P.quit_other_apps(); P.prelaunch("X")
-        # Bloqueo de teclado y ratón: en Windows va por rawflow.winlock (o RawFlow.exe --bloqueo), nunca por rfui (Mac).
-        # El proceso se SIMULA: lanzarlo de verdad en un PC con Windows bloqueaba el teclado y el ratón de quien pasaba
-        # las pruebas (23-nov-2026); en el Mac no se notaba porque winlock se niega a arrancar fuera de Windows.
+        # Escucha de «Esc ×3» (ya no bloquea teclado ni ratón): en Windows va por rawflow.winlock (o RawFlow.exe
+        # --escuchar), nunca por rfui (Mac). El proceso se SIMULA: no hace falta poner un gancho de teclado de verdad
+        # en el equipo de quien pasa las pruebas.
         import io
         lanzados = []
 
@@ -328,11 +328,16 @@ def funciona_en_windows():
         popen = inputlock.subprocess.Popen
         inputlock.subprocess.Popen = _Bloqueo
         try:
-            assert inputlock.InputLock().lock() is False       # sin «BLOCKING» del proceso: no queda bloqueado
+            assert inputlock.InputLock().listen() is False     # sin «LISTENING» del proceso: no hay escucha
+            # y un ayudante que dijera «BLOCKING» (el bloqueo de antes) JAMÁS se acepta: nada debe bloquear
+            _Bloqueo.__init__ = lambda self, cmd, *a, **k: (lanzados.append([str(x) for x in cmd]), setattr(
+                self, "stdin", io.StringIO()), setattr(self, "stdout", io.StringIO("BLOCKING hook\n")))[0]
+            assert inputlock.InputLock().listen() is False
         finally:
             inputlock.subprocess.Popen = popen
-        assert len(lanzados) == 1 and not any("rfui" in x.lower() for x in lanzados[0]), lanzados
-        assert lanzados[0][-2:] == ["-m", "rawflow.winlock"] or lanzados[0][-1] == "--bloqueo", lanzados
+        assert len(lanzados) == 2 and not any("rfui" in x.lower() for x in lanzados[0]), lanzados
+        assert lanzados[0][-2:] == ["-m", "rawflow.winlock"] or lanzados[0][-1] == "--escuchar", lanzados
+        assert not any("block" in x.lower() or "bloqueo" in x.lower() for c in lanzados for x in c), lanzados
         import subprocess
         real = subprocess.run
         subprocess.run = lambda cmd, *a, **k: (_ for _ in ()).throw(FileNotFoundError(cmd[0])) \
@@ -426,10 +431,31 @@ _SETTINGS = {"faceAutoSearchEnabled": "0", "enableExpertSettings": "0", "useClou
 
 
 @caso
+def seleccion_fallida_desenfocada():
+    """Sin caras y casi sin nitidez frente al evento (boda 14 nov: bokeh total, movida) → fallida; una foto blanda
+    pero con algo nítido (el gato, a 0,13 de la mediana) o con una cara, NO; con pocas fotos no se aplica."""
+    from rawflow import seleccion as S
+
+    def fila(n, nit, caras=()):
+        return {"foto": f"F{n:04d}.ARW", "t": n * 60.0, "caras": list(caras), "personas": len(caras), "lum": 80,
+                "negro": 5, "quemado": 0, "desv": 50, "nit": nit}
+    rows = [fila(i, 260 + i) for i in range(40)]
+    rows[5]["nit"] = 4                                              # desenfocada del todo, sin caras
+    rows[9]["nit"] = 36                                             # blanda pero buena (0,13 de la mediana)
+    rows[12]["nit"] = 3
+    rows[12]["caras"] = [{"x": 0.4, "y": 0.4, "w": 0.1, "h": 0.15, "ojoI": 0.3, "ojoD": 0.3, "px": 200, "nit": 3}]
+    d = S.decide(rows)
+    assert set(d) == {"F0005.ARW"} and "desenfocada" in d["F0005.ARW"], d
+    assert S.decide(rows[:15]) == {}, "con menos de 20 fotos no hay mediana: no se aplica"
+
+
+@caso
 def motor_retouch_cadena_igual_a_arams():
     """El paso 4 sin ventana manda al motor EXACTAMENTE la misma cadena que Arams (mismo orden, mismos valores)."""
     from rawflow import retouch_engine as r
-    assert r.build_plugins(_CINEMA, _SETTINGS, _INSTALLED) == _ARAMS_CHAIN
+    def igual(c):                                       # la ruta del plugin, con «/» en cualquier sistema
+        return [dict(x, path=Path(x["path"]).as_posix()) for x in c]
+    assert igual(r.build_plugins(_CINEMA, _SETTINGS, _INSTALLED)) == igual(_ARAMS_CHAIN)
 
 
 @caso
@@ -480,12 +506,19 @@ def motor_retouch_reanuda_sin_repetir():
     for n in ("A.jpg", "B.jpg", "C.jpg"):
         write(src / n, n.encode() * 60_000)
     write(dest / "A.jpg", b"y" * 200_000)                                 # ya retocada antes
-    fake = bindir / "motor_falso"                       # la ruta de Python tiene espacios: envoltorio sh
-    fake.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{bindir / "motor_falso.py"}" "$@"\n')
+    if sys.platform == "win32":                         # Windows: envoltorio .cmd (CreateProcess no lee «#!»)
+        fake = bindir / "motor_falso.cmd"
+        fake.write_text(f'@"{sys.executable}" "{bindir / "motor_falso.py"}" %*\n')
+    else:                                               # la ruta de Python tiene espacios: envoltorio sh
+        fake = bindir / "motor_falso"
+        fake.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{bindir / "motor_falso.py"}" "$@"\n')
     (bindir / "motor_falso.py").write_text("""
 import json, os, shutil, sys
-job = json.load(open(sys.argv[2]))
-out = os.fdopen(int(os.environ["RF_FD"]), "w", buffering=1)
+job = json.load(open(sys.argv[2], encoding="utf-8"))
+if "RF_FILE" in os.environ:                             # Windows: los avisos van a un archivo, línea a línea
+    out = open(os.environ["RF_FILE"], "a", encoding="utf-8", buffering=1)
+else:
+    out = os.fdopen(int(os.environ["RF_FD"]), "w", buffering=1)
 print("READY 0.1", file=out)
 for i, it in enumerate(job["items"]):
     print("START", i, file=out)
@@ -494,7 +527,7 @@ for i, it in enumerate(job["items"]):
     shutil.copy(it["in"], it["tmp"]); os.rename(it["tmp"], it["out"])
     print("OK", i, "0.01", file=out)
 print("END 0.2", file=out)
-""")
+""", encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
     orig = (r.BIN, r.plan, r.WORK)
     r.BIN, r.plan, r.WORK = fake, (lambda name="CINEMA": _ARAMS_CHAIN), bindir
@@ -660,6 +693,12 @@ class _Falsos:
                      "quemado": 1, "desv": 45, "nit": 400, "estetica": 0.6, "escena": [["people", 0.9]]}
                     for i, q in enumerate(paths)]
         self._set(sel_, "analyze", analizar)
+        # Windows: la Selección IA mide con seleccion_win; que use la misma IA simulada (la que ponga cada prueba)
+        if sys.platform == "win32":
+            from rawflow import seleccion_win as sw
+            self._set(sw, "analyze", lambda paths, log=None, should_stop=None, progress=None:
+                      sel_.analyze(paths, "", log, should_stop, progress))
+            self._set(sw, "rescue", lambda rows, req, path_of: 0)
         self._set(iu, "_rfui", lambda: "/bin/echo")
         self._set(iu, "start_project", start_project)
         self._set(iu, "edit_only", edit_only)
@@ -688,7 +727,35 @@ class _Falsos:
         self._set(pl.Pipeline, "_dxo_dialog", lambda self_, stop: None)
         self._set(pl.Pipeline, "_present", lambda self_: "skip")
         self._set(pl.Pipeline, "_close_apps", lambda self_: None)
+        if sys.platform == "win32":
+            self._falsos_windows(run, tm)
         return self
+
+    def _falsos_windows(self, run, tm):
+        """Windows: Imagen y Bridge van por imagen_win (no por imagen_ui); los mismos «programas» simulados."""
+        from rawflow import imagen_win as iw
+
+        def run_win(ev, sub, log, should_stop=lambda: False, photo_type="", out_dir=None, progress=lambda f: None,
+                    charge_ok=True):
+            d = Path(ev) / sub                                 # como el de verdad: edita lo que falte (sin marca)
+            sin = core.without_imagen(d.glob("*.dng"))
+            for q in sin:
+                with open(q, "ab") as fh:
+                    fh.write(b"+imagen " + core.IMAGEN_MARK)
+            if sin:
+                self.ediciones.append((sub, len(sin), tm.monotonic()))
+            (d / ".rawflow_imagen_ok").write_text("ok", encoding="utf-8")
+            return run(ev, sub, log, should_stop=should_stop, out_dir=out_dir, progress=progress)
+
+        def bridge_only(ev, sub, log, should_stop=lambda: False, out_dir=None, progress=lambda f: None):
+            dn = sorted((Path(ev) / sub).glob("*.dng"))
+            for q in dn:
+                write(Path(out_dir) / (core.dng_base(q).upper() + ".jpg"), b"J" * 1000)
+            self.bridges.append((sub, len(dn), tm.monotonic()))
+            return Path(out_dir)
+        for name, val in (("available", lambda: True), ("bridge_path", lambda: Path("Bridge.exe")),
+                          ("run", run_win), ("bridge_only", bridge_only), ("close_app", lambda *a, **k: None)):
+            self._set(iw, name, val)
 
     def __exit__(self, *a):
         self.stop.set()
@@ -924,6 +991,79 @@ def dxo_aviso_modulos_opticos():
         assert u.dxo_modules_dialog(lambda m: None) is None and len(clicks) == 1
     finally:
         u.Screen, u.check_permissions, u.subprocess.run = orig
+
+
+def _raw_falso(path: Path, bgr, fecha: str = "2026:11:15 18:30:05", subseg: str = "37", orient: int = 6) -> Path:
+    """Un «RAW» mínimo con la estructura de un NEF: TIFF con su JPEG incrustado en un sub-IFD, la orientación y los
+    datos de la toma (hora con centésimas, f/2.8, 1/200 s, ISO 400)."""
+    import struct
+    import cv2
+    jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])[1].tobytes()
+    fecha_b = fecha.encode() + b"\0"
+
+    def ifd(entries, nxt=0):
+        return struct.pack("<H", len(entries)) + b"".join(entries) + struct.pack("<I", nxt)
+
+    def e(tag, typ, count, value):
+        return struct.pack("<HHI", tag, typ, count) + (value if isinstance(value, bytes) else struct.pack("<I", value))
+    o_ifd0 = 8
+    o_sub = o_ifd0 + 2 + 3 * 12 + 4
+    o_exif = o_sub + 2 + 2 * 12 + 4
+    o_data = o_exif + 2 + 5 * 12 + 4
+    o_vel, o_f, o_fecha = o_data, o_data + 8, o_data + 16
+    o_jpg = o_fecha + len(fecha_b)
+    body = b"II*\0" + struct.pack("<I", o_ifd0)
+    body += ifd([e(0x0112, 3, 1, struct.pack("<HH", orient, 0)), e(0x014A, 4, 1, o_sub), e(0x8769, 4, 1, o_exif)])
+    body += ifd([e(0x0201, 4, 1, o_jpg), e(0x0202, 4, 1, len(jpg))])
+    body += ifd([e(0x829A, 5, 1, o_vel), e(0x829D, 5, 1, o_f), e(0x8827, 3, 1, struct.pack("<HH", 400, 0)),
+                 e(0x9003, 2, len(fecha_b), o_fecha), e(0x9291, 2, len(subseg) + 1, (subseg.encode() + b"\0\0\0\0")[:4])])
+    body += struct.pack("<II", 1, 200) + struct.pack("<II", 28, 10) + fecha_b + jpg
+    return write(path, body)
+
+
+@caso
+def seleccion_ia_en_windows():
+    """Motor de Windows de la Selección IA (rawflow/seleccion_win.py, con OpenCV): lee de un RAW su vista previa ya
+    derecha, la hora con centésimas y la exposición; da las medidas en la escala de Vision; y con dos tomas iguales
+    seguidas, las reglas de siempre apartan una como repetida. (Sin OpenCV —en el Mac— no se usa: se salta.)"""
+    import math
+    from rawflow import seleccion as S, seleccion_win as W
+    if not W.available()[0]:
+        return
+    import cv2
+    import numpy as np
+    d = fresh("sel_win")
+    y, x = np.mgrid[0:200, 0:300]
+    img = np.dstack([(x * 255 // 300), (y * 255 // 200), ((x + y) % 256)]).astype(np.uint8)
+    cv2.circle(img, (150, 100), 50, (255, 255, 255), -1)
+    a = _raw_falso(d / "DSC_0001.NEF", img)
+    big, info = W.read_raw(a)
+    assert big is not None and big.shape[:2] == (300, 200), None if big is None else big.shape    # girada (orientación 6)
+    assert abs(info["t"] % 1 - 0.37) < 1e-6, info                                              # centésimas de la hora
+    assert abs(info["ev"] - (math.log2(2.8 * 2.8 * 200) - 2)) < 1e-6, info                       # f/2.8, 1/200 s, ISO 400
+    assert W.read_raw(write(d / "basura.NEF", b"esto no es una foto" * 50))[0] is None
+    # escala de Vision: sin saltos, y los umbrales de las reglas caen donde se calibró
+    assert abs(W._to_vision(0.37, 0.0) - 0.16) < 1e-9 and W._to_vision(0.0, 0.0) == 0.0
+    vals = [W._to_vision(k / 100, 0.0) for k in range(0, 160)]
+    assert all(q >= p for p, q in zip(vals, vals[1:])), "el parecido tiene que crecer siempre"
+    assert W._to_vision(0.2, 0.3) > W._to_vision(0.2, 0.0)                # otra composición = más distintas
+    elipse = [(100 * math.cos(t), 30 * math.sin(t)) for t in (k * math.pi / 8 for k in range(16))]
+    girada = [(px * math.cos(0.5) - py * math.sin(0.5), px * math.sin(0.5) + py * math.cos(0.5)) for px, py in elipse]
+    assert abs(W._eye_ratio(elipse) - 0.3) < 0.01 and abs(W._eye_ratio(girada) - 0.3) < 0.01      # cabeza ladeada: igual
+    st = W.region_stats(np.zeros((40, 60), np.uint8))
+    assert st["lum"] == 0 and st["negro"] == 100 and st["nit"] == 0, st
+    # dos tomas iguales a 1 s y otra distinta 2 min después → una repetida apartada; la distinta y la negra aparte
+    _raw_falso(d / "DSC_0002.NEF", img, fecha="2026:11:15 18:30:06")
+    otra = cv2.GaussianBlur(np.random.default_rng(7).integers(0, 255, (200, 300, 3), dtype=np.uint8), (0, 0), 9)
+    _raw_falso(d / "DSC_0003.NEF", otra, fecha="2026:11:15 18:32:10")
+    _raw_falso(d / "DSC_0004.NEF", np.zeros((200, 300, 3), np.uint8), fecha="2026:11:15 18:40:00")
+    rows = W.analyze([str(d / f"DSC_000{k}.NEF") for k in (1, 2, 3, 4)])
+    assert [r.get("error") for r in rows] == [None] * 4 and rows[1]["dist_prev"] < 0.05 < rows[2]["dist_prev"], rows
+    assert all(k in rows[0] for k in ("foto", "t", "ev", "lum", "negro", "quemado", "desv", "nit", "caras", "personas"))
+    dec = S.decide(rows)
+    assert sorted(dec) == ["DSC_0002.NEF", "DSC_0004.NEF"] or sorted(dec) == ["DSC_0001.NEF", "DSC_0004.NEF"], dec
+    assert any(v.startswith("repetida") for v in dec.values()) and "negra" in dec["DSC_0004.NEF"], dec
+    assert S.engine() == ("win" if core.SYSTEM == "Windows" else S.engine())
 
 
 # ---------------------------------------------------------------- ejecutar

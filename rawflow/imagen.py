@@ -13,6 +13,7 @@ Imagen trabaja en la nube: este paso necesita internet.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import subprocess
@@ -107,8 +108,8 @@ def set_api_key(key: str) -> None:
     key = key.strip()
     if sys.platform == "win32":
         dat, txt = _key_dir() / "imagen_key.dat", _key_dir() / "imagen_key.txt"
-        txt.unlink(missing_ok=True)
         if not key:
+            txt.unlink(missing_ok=True)
             dat.unlink(missing_ok=True)
             return
         try:
@@ -118,6 +119,7 @@ def set_api_key(key: str) -> None:
             os.replace(tmp, dat)
         except OSError as e:
             raise ImagenError(f"No pude guardar la clave en esta PC: {e}")
+        txt.unlink(missing_ok=True)           # la de texto plano se borra cuando la cifrada YA está guardada
         return
     if sys.platform != "darwin":
         f = Path(os.environ.get("APPDATA", Path.home())) / "RawFlow" / "imagen_key.txt"
@@ -167,11 +169,14 @@ class Client:
                     time.sleep(3 * (attempt + 1))
                     continue
                 raise ImagenError(f"Imagen respondió {e.code}: {msg}")
-            except urllib.error.URLError as e:
+            except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+                # (también los cortes a media respuesta —tiempo agotado, conexión reiniciada—, que urllib no envuelve:
+                # salían como un error cualquiera y el paso entero se repetía, creando OTRO proyecto en Imagen)
                 if attempt < retries - 1:
                     time.sleep(3 * (attempt + 1))
                     continue
-                raise ImagenError(f"Sin conexión con Imagen ({e.reason}). Este paso necesita internet.")
+                raise ImagenError(f"Sin conexión con Imagen ({getattr(e, 'reason', None) or e}). "
+                                  "Este paso necesita internet.")
 
     # ---- API
     def profiles(self) -> List[dict]:
@@ -241,14 +246,45 @@ def _put_file(url: str, path: Path):
 
 def _download(url: str, dest: Path):
     tmp = dest.with_name(dest.name + ".part")
-    with urllib.request.urlopen(urllib.request.Request(_safe_url(url), headers={"User-Agent": UA}), timeout=600) as r, \
-            open(tmp, "wb") as f:
-        while True:
-            chunk = r.read(1 << 20)
-            if not chunk:
-                break
-            f.write(chunk)
-    os.replace(tmp, dest)
+    for attempt in range(3):                  # un corte al bajar UNA foto no tira el paso (con la edición ya hecha)
+        try:
+            with urllib.request.urlopen(urllib.request.Request(_safe_url(url), headers={"User-Agent": UA}),
+                                        timeout=600) as r, open(tmp, "wb") as f:
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            os.replace(tmp, dest)
+            return
+        except (urllib.error.URLError, OSError, http.client.HTTPException):
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if attempt == 2:
+                raise
+            time.sleep(4 * (attempt + 1))
+
+
+API_MARK = ".rawflow_imagen_api.json"       # en «2 DNGs»: el proyecto de Imagen (por API) que este evento ya envió
+
+
+def _read_mark(f: Path) -> dict:
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) and d.get("uuid") else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_mark(f: Path, d: dict) -> None:
+    try:
+        tmp = f.with_name(f.name + ".tmp")
+        tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, f)
+    except OSError:
+        pass
 
 
 def _name_from(link: dict, url_key: str = "download_link") -> str:
@@ -290,49 +326,82 @@ def edit_event(event_dir: Path, dng_subfolder: str, log: Log, progress: Callable
         log("Imagen: todas las fotos ya están en «Fotos finales».")
         return out
 
+    # Pruebas: la API de Imagen COBRA por foto. Con estas variables (las ponen las pruebas de RawFlow) jamás se llama,
+    # aunque en este equipo haya una clave guardada.
+    if os.environ.get("RAWFLOW_SIN_APPS") == "1" or os.environ.get("RAWFLOW_PRUEBA_SIN_COBRO") == "1":
+        raise ImagenError("Pruebas: no se llama a la API de Imagen (cobra por foto).")
+
     c = Client(api_key or get_api_key())
-    prof = find_profile(c.profiles(), profile_name)
-    ptype = PHOTO_TYPES.get(photo_type, photo_type)
-    name = f"{event_dir.name} · RawFlow {time.strftime('%Y-%m-%d %H%M%S')}"
-    log(f"Imagen: proyecto «{name}» · perfil {prof['profile_name']} · {photo_type} · {len(todo)} fotos")
-    uuid = c.create_project(name)
+    # ¿Este evento ya envió un proyecto con estas fotos y la edición quedó pedida? Entonces se RETOMA ese proyecto.
+    # Antes, cualquier corte después de pedir la edición (internet, una descarga) hacía que el reintento creara OTRO
+    # proyecto y volviera a subir y a editar todo: la misma tanda, pagada dos veces.
+    marca = dng_dir / API_MARK
+    prev = _read_mark(marca)
+    nombres = sorted(p.name for p in todo)
+    retomar = (prev.get("fase") in ("editando", "exportando") and set(nombres) <= set(prev.get("fotos") or []))
+    if retomar:
+        uuid, fase = str(prev["uuid"]), prev["fase"]
+        log(f"Imagen: se retoma el proyecto «{prev.get('nombre', uuid)}», ya enviado: no se sube ni se edita otra vez.")
+    else:
+        prof = find_profile(c.profiles(), profile_name)
+        ptype = PHOTO_TYPES.get(photo_type, photo_type)
+        name = f"{event_dir.name} · RawFlow {time.strftime('%Y-%m-%d %H%M%S')}"
+        log(f"Imagen: proyecto «{name}» · perfil {prof['profile_name']} · {photo_type} · {len(todo)} fotos")
+        uuid, fase = c.create_project(name), "editando"
+        prev = {"uuid": uuid, "nombre": name, "fotos": nombres, "fase": "subiendo"}
+        _write_mark(marca, prev)
 
-    links = c.upload_links(uuid, [p.name for p in todo])
-    total = sum(p.stat().st_size for p in todo)
-    sent = 0
-    for i, p in enumerate(todo, 1):
-        if should_stop():
-            raise ImagenError("Cancelado.")
-        url = links.get(p.name)
-        if not url:
-            raise ImagenError(f"Imagen no dio enlace de subida para {p.name}.")
-        log(f"   subiendo {i}/{len(todo)}  {p.name}")
-        _put_file(url, p)
-        sent += p.stat().st_size
-        progress(0.45 * sent / total)
+        links = c.upload_links(uuid, [p.name for p in todo])
+        total = sum(p.stat().st_size for p in todo)
+        sent = 0
+        for i, p in enumerate(todo, 1):
+            if should_stop():
+                raise ImagenError("Cancelado.")
+            url = links.get(p.name)
+            if not url:
+                raise ImagenError(f"Imagen no dio enlace de subida para {p.name}.")
+            log(f"   subiendo {i}/{len(todo)}  {p.name}")
+            _put_file(url, p)
+            sent += p.stat().st_size
+            progress(0.45 * sent / total)
 
-    c.start_edit(uuid, prof["profile_key"], ptype, tools or DEFAULT_TOOLS)
-    _wait(c, uuid, "edit", log, progress, 0.45, 0.75, should_stop)
+        c.start_edit(uuid, prof["profile_key"], ptype, tools or DEFAULT_TOOLS)
+        prev["fase"] = "editando"
+        _write_mark(marca, prev)                  # desde aquí, un reintento retoma ESTE proyecto
 
-    # XMP de Imagen junto a los DNG (Bridge / Camera Raw los aplica al abrir)
     try:
-        for link in c.links(uuid, "edit"):
-            n = _name_from(link)
-            if n.lower().endswith(".xmp"):
-                _download(link["download_link"], dng_dir / n)
-        log("   ediciones .xmp guardadas junto a los DNG (para Bridge / Camera Raw)")
-    except Exception as e:  # noqa: BLE001
-        log(f"   (no se pudieron bajar los .xmp: {e})")
+        if fase == "editando":
+            _wait(c, uuid, "edit", log, progress, 0.45, 0.75, should_stop)
 
-    c.start_export(uuid)
-    _wait(c, uuid, "export", log, progress, 0.75, 0.9, should_stop)
+            # XMP de Imagen junto a los DNG (Bridge / Camera Raw los aplica al abrir)
+            try:
+                for link in c.links(uuid, "edit"):
+                    n = _name_from(link)
+                    if n.lower().endswith(".xmp"):
+                        _download(link["download_link"], dng_dir / n)
+                log("   ediciones .xmp guardadas junto a los DNG (para Bridge / Camera Raw)")
+            except Exception as e:  # noqa: BLE001
+                log(f"   (no se pudieron bajar los .xmp: {e})")
+
+            c.start_export(uuid)
+            prev["fase"] = "exportando"
+            _write_mark(marca, prev)
+        _wait(c, uuid, "export", log, progress, 0.75, 0.9, should_stop)
+    except ImagenError as e:
+        if str(e).startswith("Imagen no pudo"):   # Imagen dio ese proyecto por FALLIDO: no se retoma, se hace otro
+            marca.unlink(missing_ok=True)
+        raise
     out.mkdir(parents=True, exist_ok=True)
     exp = c.links(uuid, "export")
     for i, link in enumerate(exp, 1):
         n = final_name(_name_from(link), ".jpg")
+        if (out / n).exists() and (out / n).stat().st_size > 0:      # ya bajada en un intento anterior
+            progress(0.9 + 0.1 * i / max(1, len(exp)))
+            continue
         log(f"   descargando {i}/{len(exp)}  {n}")
         _download(link["download_link"], out / n)
         progress(0.9 + 0.1 * i / max(1, len(exp)))
+    marca.unlink(missing_ok=True)
     log(f"✓  Imagen: {len(exp)} JPEG en «{out.name}».")
     return out
 

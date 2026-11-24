@@ -129,7 +129,15 @@ Así no se paga Imagen (cobra por foto) ni se gasta tiempo en una foto que no si
   solas más del 5 %, esas no se aplican; si saliera repetida más de la mitad del evento, solo las clavadas (≤0,10).
 - Si la IA falla, el evento NO se para: pasan todas como buenas.
 - Para recuperar una: muévela a `Fotos buenas` y pulsa «Seguir» (RawFlow la procesa y no la vuelve a apartar).
-- Se activa o desactiva con **doble clic en «Selección IA»**. Solo en Mac.
+- Se activa o desactiva con **doble clic en «Selección IA»**.
+- **También en Windows (23-nov-2026).** En el Mac cada foto la mide la IA de Apple; en Windows no existe, así que
+  RawFlow lleva dentro su propio motor (`rawflow/seleccion_win.py`: OpenCV con el detector de caras YuNet, la malla
+  facial de MediaPipe y una huella MobileNetV3; modelos en `rawflow/modelos`, 15 MB, sin internet). Saca las mismas
+  medidas en la misma escala (ojos: cerrados <0,12, abiertos ≥0,18; parecido: repetidas ≤0,16) y las reglas son
+  las mismas de arriba. ≈0,17 s por foto. Calibrado mirando las fotos de dos eventos reales (892 NEF): aparta el
+  13 % y el 20 % (en el Mac, 17 % y 9 % en los suyos). Lee la vista previa incrustada en NEF, ARW, CR2 y DNG.
+  En Windows **no** se aplican dos reglas que dependen de la IA de Apple: la toma «fallida» (nota estética) y la
+  toma «al piso / a la pared» (etiquetas de escena); las negras, blancas, repetidas y de ojos cerrados, sí.
 
 ## Candado de Imagen (4.15): nada sin Imagen
 En el evento «14nov 2026 JUTIAPA» (597 fotos) la descarga de ediciones de la tanda 1 falló **dentro
@@ -192,11 +200,11 @@ abierto) mientras «Instalar máquina virtual» trabaja. Tus demás apps se cier
   lento (≈320 s por foto en vez de ≈60) y DxO 1,7 veces. Por eso Retouch4me empieza cuando DxO y Bridge ya cerraron.
 
 ## Durante el proceso (4.10)
-- **Trackpad, ratones y teclados bloqueados** todo el evento, dure lo que dure (antes se soltaba a las 3 horas):
-  vale para el trackpad del Mac y para cualquier ratón o teclado USB/Bluetooth; el cursor se queda quieto donde lo
-  deja RawFlow, así no hay clics falsos. **Esc tres veces** (pulsaciones, no la tecla mantenida) sale al instante:
-  cancela y suelta el bloqueo; luego «Reintentar desde el paso N» sigue donde se quedó. Si el Mac despierta con la
-  pantalla bloqueada, deja escribir la contraseña.
+- **El ratón, el trackpad y el teclado ya NO se bloquean** (desde el 23-nov-2026; antes quedaban bloqueados todo el evento), ni en
+  Mac ni en Windows. Mientras RawFlow maneja Imagen y Bridge con la pantalla conviene no tocar esas ventanas: un clic
+  tuyo en mal momento puede hacer fallar ese paso (se reintenta solo). **Esc tres veces** (pulsaciones, no la tecla
+  mantenida) sigue cancelando al instante desde cualquier programa; luego «Reintentar desde el paso N» sigue donde se
+  quedó. RawFlow solo escucha esa tecla (`rfui escuchar` en Mac, `rawflow/winlock.py` en Windows): no retiene ninguna.
 - **«Ya puedes retirar la memoria»** se queda en pantalla, animado, hasta que la sacas de verdad: RawFlow la desmonta
   sin expulsarla y ve cuándo desaparece del lector; entonces dice «Memoria retirada» y se va.
 - **Sin cargador**: aviso rojo arriba con la batería y para cuánto da, sonido, notificación y, con poca batería, voz.
@@ -211,8 +219,8 @@ abierto) mientras «Instalar máquina virtual» trabaja. Tus demás apps se cier
 - **PC con Windows**: el instalador de `Instaladores/WINDOWS` (ver «Abrir»). RawFlow busca solo DxO PureRAW, Imagen AI, Adobe Bridge, Retouch4me y CineSlide en las
   carpetas donde los dejan sus instaladores (`rawflow/programas.py`) y lo vuelve a mirar cada 15 s: si instalas uno
   con RawFlow abierto, lo detecta sin reiniciar.
-- En Windows ya funcionan: Mover, DxO, CineSlide (su Python de `C:\Program Files (x86)\CineSlide`), el bloqueo de
-  ratón y teclado con Esc ×3 (`rawflow/winlock.py`), el aviso de batería y las mediciones. Imagen/Bridge y
+- En Windows ya funcionan: Mover, DxO, CineSlide (su Python de `C:\Program Files (x86)\CineSlide`), cancelar
+  con Esc ×3 (`rawflow/winlock.py`, sin bloquear ratón ni teclado), el aviso de batería y las mediciones. Imagen/Bridge y
   Retouch4me siguen automatizados solo en Mac (en Windows se omiten) hasta portarlos con las apps instaladas.
 - **Máquina virtual (Mac)**: «Instalar máquina virtual» lo hace todo en el Mac con los instaladores locales (ver
   «Instalar máquina virtual» más abajo): Windows, limpieza, programas, barra, inicio de sesión guiado y base.

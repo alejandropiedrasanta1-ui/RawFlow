@@ -29,7 +29,11 @@ if (-not (Test-Path $vpy)) {
 if (-not (Test-Path $vpy)) { throw "Falta Python $pyv (https://www.python.org/downloads/)" }
 & $vpy -m pip install --upgrade --disable-pip-version-check -q pip -r requirements.txt pyinstaller
 if ($LASTEXITCODE -ne 0) { throw 'pip no pudo instalar las librerías' }
-& $vpy -c "import PySide6, psutil, PyInstaller; print('    PySide6', PySide6.__version__, '· psutil', psutil.__version__, '· PyInstaller', PyInstaller.__version__)"
+& $vpy -c "import PySide6, psutil, PyInstaller, cv2, numpy; print('    PySide6', PySide6.__version__, '· psutil', psutil.__version__, '· PyInstaller', PyInstaller.__version__, '· OpenCV', cv2.__version__, '· numpy', numpy.__version__)"
+if ($LASTEXITCODE -ne 0) { throw 'Falta alguna librería (PySide6, psutil, PyInstaller, OpenCV o numpy)' }
+foreach ($m in 'face_detection_yunet_2023mar.onnx', 'face_landmarker.task', 'mobilenet_v3_large.tflite') {
+    if (-not (Test-Path "rawflow\modelos\$m")) { throw "Falta el modelo de la Selección IA: rawflow\modelos\$m (ver rawflow\modelos\LEEME.txt)" }
+}
 
 Paso 'Icono (todos los tamaños) e imágenes del instalador...'
 & $vpy tools\hacer_icono.py
@@ -60,6 +64,7 @@ $qm = Join-Path $raiz '.venv-win\Lib\site-packages\PySide6\translations\qtbase_e
     --add-data "$raiz\rawflow\cineslide_run.py;rawflow" --add-data "$raiz\rawflow\r4m_worker.js;rawflow" `
     --add-data "$qm;PySide6/translations" `
     --add-data "$raiz\rawflow\fonts;rawflow/fonts" --collect-data qtawesome --hidden-import qtawesome `
+    --add-data "$raiz\rawflow\modelos;rawflow/modelos" --hidden-import cv2 --hidden-import numpy `
     --collect-submodules winrt --collect-binaries winrt `
     --exclude-module tkinter --exclude-module unittest --exclude-module pydoc `
     RawFlow.py

@@ -1,4 +1,9 @@
-"""Selección IA: aparta las tomas malas y las REPETIDAS antes de DxO, con la IA del Mac (Vision), sin internet. NUNCA borra.
+"""Selección IA: aparta las tomas malas y las REPETIDAS antes de DxO, sin internet. NUNCA borra.
+
+Cada foto se MIDE con el motor del equipo (ver engine()): en el Mac, la IA de Apple (Vision, ayudante «rfui cull»); en
+Windows, OpenCV con modelos que van dentro de RawFlow (rawflow/seleccion_win.py), que da las mismas medidas en la misma
+escala. Lo que se aparta lo DECIDE este módulo, con las mismas reglas y umbrales en los dos sistemas. (En Windows no
+hay nota estética ni etiquetas de escena: «al piso» y la «fallida» por nota no se aplican; la «fallida» por nitidez sí.)
 
 Es el paso 2, justo después de «Mover»: analiza la vista previa de cada RAW (≈0,07 s por foto) y, dentro de
 «1 Original», deja las malas en «Fotos malas» (con el motivo de cada una en «motivos.txt») y las buenas en
@@ -21,7 +26,8 @@ detalles de vestido/anillos/ramo, noches con flash, gente mirando abajo, besos y
   · la exposición se mide en las caras, no en el cuadro (las noches con flash tienen el fondo negro);
   · mirar abajo (cabeza inclinada) o de perfil no es un parpadeo;
   · tomas accidentales (negra, blanca, piso, pared, techo o cielo sin nadie ni ningún detalle; fallidas sin ninguna
-    cara a las que la IA da muy mala nota; caras blancas o negras del todo) se apartan aunque estén solas;
+    cara a las que la IA da muy mala nota, o sin ninguna cara y casi sin nitidez frente al resto del evento —esta
+    también en Windows—; caras blancas o negras del todo) se apartan aunque estén solas;
   · si por comparación salieran más de 3 y del 15 % del evento, algo no cuadra: esas no se apartan.
 """
 from __future__ import annotations
@@ -60,7 +66,10 @@ FAILED_AEST = -0.2       # sin ninguna cara y con nota de la IA por debajo de es
                          # negra -0,91, baile movido -0,50, disparo al techo -0,27; la peor buena, la banda, -0,04)
 FACE_BLOWN = 245         # luz media de las caras: blancas del todo
 FACE_BLACK = 15          # …negras del todo (y el cuadro también oscuro: no saltó el flash)
-SOFT_MAX_SHARE = 0.05    # las reglas «a solas» más finas (fallida, caras blancas/negras): si saltan en más del 5 %,
+BLUR_REL = 0.03          # sin ninguna cara y con la nitidez por debajo del 3 % de la mediana del evento: desenfocada
+BLUR_ABS = 20            # o movida del todo (y además nitidez < 20). Medido (24-nov-2026, sin nota estética en Windows):
+                         # boda 14 nov las 7 fallidas ≤0,02; la buena sin caras más blanda de 5 eventos ≥0,059
+SOFT_MAX_SHARE = 0.05   # las reglas «a solas» más finas (fallida, caras blancas/negras): si saltan en más del 5 %,
                          # algo no cuadra con esa cámara y no se aplican
 
 FLOOR_WALL = {"floor", "wall", "ceiling", "tile", "carpet", "concrete", "ground", "asphalt", "rug", "wood_processed",
@@ -73,6 +82,21 @@ DETAIL = {"jewelry", "ring", "flower", "bouquet", "flower_arrangement", "cake", 
 
 
 # ------------------------------------------------------------------------------------------------- análisis
+def engine() -> str:
+    """Con qué se miden las fotos en este equipo: «mac» (Vision, por rfui), «win» (OpenCV, seleccion_win) o «» (no se
+    puede: la Selección IA queda apagada y pasan todas las fotos)."""
+    from . import core
+    if core.SYSTEM == "Darwin":
+        return "mac"
+    if core.SYSTEM == "Windows":
+        try:
+            from . import seleccion_win
+            return "win" if seleccion_win.available()[0] else ""
+        except Exception:  # noqa: BLE001
+            return ""
+    return ""
+
+
 def analyze(paths: List[str], rfui: str, log: Callable[[str], None] = lambda m: None,
             should_stop: Callable[[], bool] = lambda: False,
             progress: Callable[[float], None] = lambda f: None) -> List[dict]:
@@ -169,11 +193,14 @@ def _accidental(r: dict) -> str:
     return ""
 
 
-def _soft_bad(r: dict) -> str:
-    """Tomas malas a solas, por reglas más finas (con tope: ver SOFT_MAX_SHARE)."""
+def _soft_bad(r: dict, nit_med: float = 0.0) -> str:
+    """Tomas malas a solas, por reglas más finas (con tope: ver SOFT_MAX_SHARE). nit_med: nitidez mediana del evento."""
     est = r.get("estetica")
     if not r.get("caras") and est is not None and float(est) < FAILED_AEST:
         return "toma fallida: movida o sin un sujeto claro (la IA del Mac le da muy mala nota)"
+    nit = float(r.get("nit", -1) or -1)
+    if not r.get("caras") and nit_med > 0 and 0 <= nit < BLUR_ABS and nit < BLUR_REL * nit_med:
+        return "toma fallida: desenfocada o movida del todo, sin ninguna cara (no hay nada nítido)"
     fl = _face_lum(r)
     if fl is not None and fl >= FACE_BLOWN:
         return "caras quemadas (blancas, sin detalle)"
@@ -543,7 +570,9 @@ def decide(rows: List[dict]) -> Dict[str, str]:
     ok_rows = [r for r in rows if not r.get("error")]
     n = len(ok_rows)
     accidental = {r["foto"]: why for r in ok_rows if (why := _accidental(r))}
-    soft = {r["foto"]: why for r in ok_rows if r["foto"] not in accidental and (why := _soft_bad(r))}
+    nits = sorted(float(r["nit"]) for r in ok_rows if float(r.get("nit", 0) or 0) > 0)
+    nit_med = nits[len(nits) // 2] if len(nits) >= 20 else 0.0     # con pocas fotos no hay mediana fiable
+    soft = {r["foto"]: why for r in ok_rows if r["foto"] not in accidental and (why := _soft_bad(r, nit_med))}
     if len(soft) > max(3, int(SOFT_MAX_SHARE * n)):     # tantas «a solas» = algo raro con esa cámara: no
         soft = {}
     lone = {**accidental, **soft}
@@ -664,7 +693,8 @@ def run(raw_dir: Path, rfui: str, done_stems: set, log: Callable[[str], None] = 
         should_stop: Callable[[], bool] = lambda: False,
         progress: Callable[[float], None] = lambda f: None) -> Dict[str, str]:
     """Selección IA de las fotos de «1 Original» que aún no tienen DNG (las recuperadas a mano nunca se vuelven a
-    apartar): las analiza en el orden de la toma, decide y aparta. Devuelve {foto: motivo} de las apartadas."""
+    apartar): las analiza en el orden de la toma, decide y aparta. Devuelve {foto: motivo} de las apartadas.
+    rfui: el ayudante del Mac; vacío o None = el motor de Windows (seleccion_win)."""
     from . import core
     raw_dir = Path(raw_dir)
     keep = kept_restored(raw_dir)
@@ -673,13 +703,18 @@ def run(raw_dir: Path, rfui: str, done_stems: set, log: Callable[[str], None] = 
     fotos.sort(key=lambda q: (_camera(q.stem), q.stat().st_mtime, q.name))    # orden de la toma, cámara por cámara
     if not fotos:
         return {}
-    rows = analyze([str(q) for q in fotos], rfui, log, should_stop, progress)
+    win = None
+    if not rfui:
+        from . import seleccion_win as win
+    rows = (analyze([str(q) for q in fotos], rfui, log, should_stop, progress) if rfui
+            else win.analyze([str(q) for q in fotos], log, should_stop, progress))
     try:                                                 # sin esto, más prudente: si no se ve a alguien, se quedan las dos
         req = rescue_requests(rows)
         if req and not should_stop():
             by_name = {q.name: q for q in fotos}
-            n = rescue(rows, req, lambda name: by_name[name], rfui)
-            log(f"Selección IA: {n} caras que Vision no vio a la primera, encontradas en {len(req)} tomas")
+            n = (rescue(rows, req, lambda name: by_name[name], rfui) if rfui
+                 else win.rescue(rows, req, lambda name: by_name[name]))
+            log(f"Selección IA: {n} caras que no se vieron a la primera, encontradas en {len(req)} tomas")
     except Exception:  # noqa: BLE001
         pass
     decisions = {k: v for k, v in decide(rows).items() if k not in keep}

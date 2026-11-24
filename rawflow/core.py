@@ -470,6 +470,14 @@ def _unique_target(dest_dir: Path, name: str, size: int, src: str = "", taken: O
         n += 1
 
 
+def _copy_times(src: str, dst) -> None:
+    """La fecha de la foto pasa a su copia (con ella se ordenan y se numeran las finales). SOLO las fechas: copystat
+    copiaba también «solo lectura» / «bloqueado» de las fotos PROTEGIDAS en la cámara, y en Mac una copia bloqueada ya
+    no se puede renombrar ni borrar (el paso 1 fallaba); en Windows la copia quedaba de solo lectura."""
+    st = os.stat(src)
+    os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
 def copy_files(files: Iterable[RawFile], dest_dir: Path,
                on_progress: Optional[Callable[[int, str], None]] = None,
                should_stop: Callable[[], bool] = lambda: False,
@@ -514,7 +522,7 @@ def copy_files(files: Iterable[RawFile], dest_dir: Path,
                         on_progress(stats.bytes_done, name)
                 dst.flush()
                 os.fsync(dst.fileno())          # que esté de verdad en el disco antes de borrar
-            shutil.copystat(f.path, tmp)
+            _copy_times(f.path, tmp)
             if os.path.getsize(tmp) != f.size:
                 raise IOError("el tamaño no coincide tras copiar")
             os.replace(tmp, target)
@@ -592,26 +600,43 @@ def move_files_parallel(files: List[RawFile], dest_dir: Path,
             tmp = target.with_name(target.name + ".part")
             try:
                 shutil.copyfile(f.path, tmp)            # fcopyfile: copia en el kernel
-                fd = os.open(tmp, os.O_RDWR if SYSTEM == "Windows" else os.O_RDONLY)  # Windows: fsync pide escritura
+                # Windows: fsync pide escritura. Y SIEMPRE en binario (O_BINARY): abierto en modo texto para leer y
+                # escribir, Windows le QUITA el último byte al archivo si es 0x1A («fin de archivo» de MS-DOS); la
+                # foto quedaba 1 byte más corta, no pasaba la comprobación de tamaño y se quedaba fuera del evento.
+                fd = os.open(tmp, (os.O_RDWR | getattr(os, "O_BINARY", 0)) if SYSTEM == "Windows" else os.O_RDONLY)
                 try:
                     os.fsync(fd)
                 finally:
                     os.close(fd)
-                shutil.copystat(f.path, tmp)
+                _copy_times(f.path, tmp)
                 if os.path.getsize(tmp) != f.size:
                     raise IOError("el tamaño no coincide tras copiar")
                 os.replace(tmp, target)
                 done(f.size, name, "copied")
                 remove(f, name)
             except Exception as e:  # noqa: BLE001
-                Path(tmp).unlink(missing_ok=True)
+                try:
+                    Path(tmp).unlink(missing_ok=True)
+                except OSError:                     # ni se puede quitar el resto: que no tumbe toda la memoria
+                    pass
                 done(f.size, name, "failed", str(e))
 
-    groups: Dict[str, List[RawFile]] = {}
+    # Dos memorias con LAS MISMAS fotos (cámara con doble ranura en espejo): leídas a la vez, la segunda no veía aún
+    # la copia de la primera (a medio escribir) y guardaba la misma foto otra vez como «DSC0001_1» → el evento entero
+    # salía doble. Las repetidas (mismo nombre y tamaño) se dejan para después: ya con la primera en el disco se
+    # comparan de verdad (iguales → se saltan; distintas → «_1», como siempre).
+    seen, primero, repetidas = set(), [], []
     for f in files:
+        k = (os.path.basename(f.path).lower(), f.size)
+        (repetidas if k in seen else primero).append(f)
+        seen.add(k)
+    groups: Dict[str, List[RawFile]] = {}
+    for f in primero:
         groups.setdefault(f.drive, []).append(f)
     with ThreadPoolExecutor(max_workers=max(1, min(4, len(groups)))) as ex:
         list(ex.map(one_drive, groups.values()))
+    if repetidas:
+        one_drive(repetidas)
     return stats
 
 
@@ -710,11 +735,17 @@ def eject_drive(mountpoint: str) -> bool:
             return subprocess.run(["diskutil", "unmount", mountpoint], capture_output=True,
                                   timeout=60).returncode == 0
         if SYSTEM == "Windows":
+            # «Eject» no dice si lo consiguió (y PowerShell salía con 0 aunque la memoria siguiera puesta: RawFlow decía
+            # «ya puedes sacarla» sin ser verdad). Ahora se espera hasta 12 s a que la unidad deje de estar disponible.
             letter = mountpoint[:2]
-            ps = ("(New-Object -comObject Shell.Application).Namespace(17)"
-                  f".ParseName('{letter}').InvokeVerb('Eject')")
+            if not (len(letter) == 2 and letter[0].isalpha() and letter[0].isascii() and letter[1] == ":"):
+                return False
+            ps = (f"$i=(New-Object -ComObject Shell.Application).Namespace(17).ParseName('{letter}');"
+                  "if(-not $i){exit 1};$i.InvokeVerb('Eject');"
+                  f"foreach($n in 1..24){{Start-Sleep -Milliseconds 500;if(-not (Test-Path '{letter}\\')){{exit 0}}}};"
+                  "exit 1")
             return subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                                  capture_output=True,
+                                  capture_output=True, timeout=45,
                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
                                   ).returncode == 0
         return subprocess.run(["udisksctl", "unmount", "-b", mountpoint],
@@ -1294,6 +1325,32 @@ def collect_dxo_dngs(event_dir: Path, subfolder: str = OUTPUT_SUBFOLDER) -> int:
                 continue                # PureRAW aún lo tiene abierto: en la siguiente vuelta
     return moved
 
+def remove_partial_dxo_dngs(event_dir: Path) -> int:
+    """Windows: borra los DNG A MEDIAS que PureRAW dejó junto a su RAW (se cortó o se canceló mientras escribía), para
+    que se vuelvan a hacer. Llamar después de collect_dxo_dngs (los completos ya pasaron a «2 DNGs») y con PureRAW
+    cerrado. Solo toca un «X-DxO….dng» incompleto que tiene su RAW «X» al lado. Devuelve cuántos borró."""
+    if SYSTEM != "Windows":
+        return 0
+    gone = 0
+    for d in (raw_dir(event_dir), raw_dir(event_dir) / GOOD_SUBFOLDER):
+        if not d.is_dir():
+            continue
+        try:
+            files = [p for p in d.iterdir() if p.is_file()]
+        except OSError:
+            continue
+        fuentes = {p.stem.lower() for p in files if p.suffix.lower() in RAW_EXTENSIONS and "-DxO" not in p.stem}
+        for p in files:
+            if p.suffix.lower() == ".dng" and "-DxO" in p.stem and dng_base(p) in fuentes:
+                try:
+                    if not dng_complete(p):
+                        p.unlink()
+                        gone += 1
+                except OSError:
+                    pass
+    return gone
+
+
 def raw_dir(event_dir: Path) -> Path:
     """Donde están los RAW del evento: <evento>/Original (o la propia carpeta si es antigua)."""
     sub = event_dir / RAW_SUBFOLDER
@@ -1333,7 +1390,13 @@ def good_raws(event_dir: Path, exts: Optional[set] = None) -> List[Path]:
     out: List[Path] = []
     for d in (raw_dir(event_dir), raw_dir(event_dir) / GOOD_SUBFOLDER):
         if d.is_dir():
-            out += [p for p in d.iterdir() if p.is_file() and p.suffix.lower() in exts and not p.name.startswith(".")]
+            todos = [p for p in d.iterdir() if p.is_file() and not p.name.startswith(".")]
+            fuentes = {p.stem.lower() for p in todos if p.suffix.lower() in RAW_EXTENSIONS and "-DxO" not in p.stem}
+            # Windows: PureRAW deja su DNG («X-DxO_….dng») junto al RAW «X» hasta que pasa a «2 DNGs». Ese DNG es el
+            # RESULTADO de una foto, no otra foto: contado como RAW, uno a medias (DxO cortado) se mandaba a revelar
+            # como si fuera nuevo y el paso nunca terminaba.
+            out += [p for p in todos if p.suffix.lower() in exts
+                    and not (p.suffix.lower() == ".dng" and "-DxO" in p.stem and dng_base(p) in fuentes)]
     return sorted(out, key=lambda p: p.name)
 
 
@@ -1377,7 +1440,7 @@ def close_pureraw_helper(batch: Path) -> None:
         elif SYSTEM == "Windows":
             ps = (f"Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*{batch.name}*' }}"
                   " | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
-            subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True,
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, timeout=30,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except Exception:
         pass

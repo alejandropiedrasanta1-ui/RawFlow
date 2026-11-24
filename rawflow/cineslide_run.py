@@ -5,7 +5,6 @@ sin abrir su ventana, igual que el botón CREAR VIDEO, con tus ajustes guardados
 
 Imprime «PROG <0..1> <texto>» mientras trabaja y «OK <ruta>» por cada video creado.
 """
-import json
 import os
 import sys
 

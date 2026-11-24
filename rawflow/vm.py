@@ -14,10 +14,9 @@ import platform
 import plistlib
 import re
 import subprocess
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List
 
 UTM_APP = Path("/Applications/UTM.app")
 UTMCTL = UTM_APP / "Contents/MacOS/utmctl"

@@ -12,7 +12,8 @@ AppName=RawFlow
 AppVersion={#AppVer}
 AppVerName=RawFlow {#AppVer}
 AppPublisher=RawFlow
-VersionInfoVersion={#AppVer}.0.0
+; (sin «.0.0» detrás: Inno completa con ceros, y con una versión de tres partes —4.20.1— «4.20.1.0.0» no compilaba)
+VersionInfoVersion={#AppVer}
 VersionInfoDescription=Instalador de RawFlow
 DefaultDirName={localappdata}\Programs\RawFlow
 DisableDirPage=yes

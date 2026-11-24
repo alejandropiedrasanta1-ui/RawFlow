@@ -83,7 +83,7 @@ class EjectToast(QWidget):
     def place(self):
         """A la izquierda del anillo de la pantalla de proceso (no tapa el nombre del evento ni los pasos)."""
         global TOAST_RECT
-        g = QGuiApplication.primaryScreen().geometry()
+        g = (getattr(self, "target", None) or QGuiApplication.primaryScreen()).geometry()   # la de la pantalla de proceso
         cx, cy = g.center().x(), g.top() + g.height() * 0.43
         R = min(g.width(), g.height()) * 0.165
         x, y = int(cx - R - 48 - self.width()), int(cy - self.height() / 2)

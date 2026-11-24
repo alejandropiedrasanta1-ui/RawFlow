@@ -1,13 +1,13 @@
-"""Bloquea el ratón, el trackpad y el teclado físicos mientras RawFlow trabaja (solo Mac).
+"""«Esc tres veces» para cancelar el evento mientras RawFlow trabaja, en Mac y en Windows.
 
-Lanza «rfui block»: un filtro de eventos de macOS que descarta lo que viene del hardware (el trackpad del Mac y
-cualquier ratón, trackpad o teclado USB/Bluetooth) y deja pasar lo que envía RawFlow (sus clics y teclas sintéticos).
-El cursor se queda quieto donde lo dejó RawFlow. Así nadie puede cambiar de app, mover el ratón ni hacer un clic falso
-hasta que el evento termine. Dura TODO el evento (antes se soltaba solo a las 3 horas). Salidas de emergencia:
-  · Esc tres veces seguidas → cancela el proceso y suelta el bloqueo al instante.
-  · Si RawFlow se cierra o se cuelga, el filtro se suelta solo (stdin cerrado / proceso padre muerto).
-  · Con la pantalla bloqueada (al despertar del reposo) deja pasar todo, para poder escribir la contraseña.
-Si rfui se cerrara solo a mitad del evento (no por Esc), se vuelve a lanzar.
+YA NO BLOQUEA NADA (23-nov-2026, a petición del usuario): el ratón, el trackpad y el teclado siguen libres todo el evento.
+Lo único que queda es un ayudante que ESCUCHA el teclado sin tocarlo («rfui escuchar» en Mac, rawflow/winlock.py en
+Windows) y avisa si pulsas Esc tres veces seguidas: es la manera de cancelar, porque la pantalla de proceso tapa la
+ventana de RawFlow y no recibe clics.
+  · Esc tres veces seguidas → cancela el proceso.
+  · Si RawFlow se cierra o se cuelga, el ayudante termina solo (stdin cerrado / proceso padre muerto).
+Si el ayudante se cerrara solo a mitad del evento (no por Esc), se vuelve a lanzar.
+(El módulo y la clase conservan su nombre de cuando sí bloqueaban.)
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ MAX_RESTARTS = 30
 
 class InputLock(QThread):
     cancel = Signal()
-    state = Signal(bool)          # True: bloqueando
+    state = Signal(bool)          # True: escuchando Esc ×3
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -34,12 +34,12 @@ class InputLock(QThread):
         cwd, flags = None, 0
         if core.SYSTEM == "Darwin":
             from .imagen_ui import _rfui
-            cmd = [_rfui(), "block", "0"]
-        else:                                    # Windows: ganchos de bajo nivel (rawflow/winlock.py), mismo protocolo
+            cmd = [_rfui(), "escuchar"]         # (un rfui antiguo no conoce «escuchar»: no arranca y no bloquea nada)
+        else:                                    # Windows: gancho de teclado que solo mira (rawflow/winlock.py)
             import os
             import sys
             if getattr(sys, "frozen", False):
-                cmd = [sys.executable, "--bloqueo"]
+                cmd = [sys.executable, "--escuchar"]
             else:
                 exe = sys.executable
                 w = os.path.join(os.path.dirname(exe), "pythonw.exe")
@@ -48,8 +48,8 @@ class InputLock(QThread):
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                              text=True, bufsize=1, cwd=cwd, creationflags=flags)
-        first = (p.stdout.readline() or "").strip()             # «BLOCKING hid» o «ERROR …»
-        if not first.startswith("BLOCKING"):
+        first = (p.stdout.readline() or "").strip()             # «LISTENING …» o «ERROR …»
+        if not first.startswith("LISTENING"):                   # (jamás se acepta un «BLOCKING»: nada debe bloquear)
             self._kill(p)
             return None
         return p
@@ -69,13 +69,14 @@ class InputLock(QThread):
             except Exception:  # noqa: BLE001
                 pass
 
-    def lock(self) -> bool:
+    def listen(self) -> bool:
+        """Empieza a escuchar Esc ×3 (sin bloquear nada). True si el ayudante arrancó."""
         if core.SYSTEM not in ("Darwin", "Windows"):
             return False
         if self.active():
             self._want = True
             return True
-        if self.isRunning():                      # el hilo del bloqueo anterior aún no terminó
+        if self.isRunning():                      # el hilo de la escucha anterior aún no terminó
             self.wait(3000)
         try:
             p = self._spawn()
@@ -108,7 +109,7 @@ class InputLock(QThread):
                 pass
             if cancelled or not self._want or self.proc is not p or restarts >= MAX_RESTARTS:
                 break
-            # se cerró solo a mitad del evento (no por Esc ni porque RawFlow lo soltara): volver a bloquear
+            # se cerró solo a mitad del evento (no por Esc ni porque RawFlow lo soltara): volver a escuchar
             restarts += 1
             self.state.emit(False)
             time.sleep(2)

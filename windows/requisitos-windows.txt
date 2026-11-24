@@ -1,2 +1,4 @@
 PySide6_Essentials
 psutil
+numpy
+opencv-python-headless

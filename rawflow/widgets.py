@@ -117,7 +117,6 @@ class ElidedLabel(QLabel):
     def setText(self, text: str) -> None:  # noqa: N802
         changed = text != self._full
         self._full = text
-        self.setToolTip(text)
         self._update()
         if changed and self.fade_changes and text and self.isVisible() and not T.reduce_motion():
             from . import anim
@@ -133,7 +132,11 @@ class ElidedLabel(QLabel):
 
     def _update(self):
         fm = QFontMetrics(self.font())
-        super().setText(fm.elidedText(self._full, self._mode, max(40, self.width())))
+        shown = fm.elidedText(self._full, self._mode, max(40, self.width()))
+        super().setText(shown)
+        # el texto entero al pasar el ratón SOLO si está recortado: repetir lo que ya se lee no ayuda, y en los pasos
+        # tapaba el aviso «Doble clic: activar o desactivar este paso»
+        self.setToolTip(self._full if shown != self._full else "")
 
 
 class StatusLabel(ElidedLabel):
@@ -616,7 +619,9 @@ class DriveCard(QFrame):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         v = self._fade.currentValue()
         p.setOpacity(1.0 if v is None else float(v))
-        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        # mientras entra o sale (su alto se anima) se dibuja ENTERA y se ve lo que cabe: con el alto del momento,
+        # la barra y los textos de abajo se montaban sobre el nombre
+        r = QRectF(0, 0, self.width(), max(self.height(), self.H)).adjusted(1, 1, -1, -1)
 
         sel, hov = self._sel, self._hov
         bg = mix(mix(QColor(T.SURFACE_2), QColor("#20232B"), hov), QColor("#1E2318"), sel)

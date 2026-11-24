@@ -120,7 +120,9 @@ class ScanWorker(QThread):
         if self.paths:
             files = core.scan_paths(self.paths, self.key, prog, lambda: self._stop)
         else:
-            files = core.scan_drive(self.key, prog, lambda: self._stop)
+            # skip_events: en un disco externo de trabajo (que también sale como «memoria») jamás se entra en las
+            # carpetas de eventos ya hechos: sus RAW y sus DNG se movían al evento nuevo, vaciando los anteriores
+            files = core.scan_drive(self.key, prog, lambda: self._stop, skip_events=True)
         if not self._stop:
             self.finished_scan.emit(self.key, files)
 
@@ -185,6 +187,16 @@ def _qc(c: str) -> QColor:
         q.setAlphaF(0.0)
         return q
     return QColor(c)
+
+
+def _inside(path, root) -> bool:
+    """¿`path` está dentro de `root` (una unidad «X:\\» o un volumen «/Volumes/SD»)?"""
+    try:
+        a = os.path.normcase(os.path.abspath(str(path)))
+        b = os.path.normcase(os.path.abspath(str(root))).rstrip("\\/")
+        return a == b or a.startswith(b + os.sep)
+    except (OSError, ValueError):
+        return False
 
 
 def _mix(a: QColor, b: QColor, k: float) -> QColor:
@@ -429,6 +441,9 @@ class TimePanel(QFrame):
         self.title.setText("TIEMPO DEL PROCESO")
         self.est = list(est)
         self.dur = [0.0 if i < start_at else None for i in range(len(STEPS))]
+        # cada evento mide desde cero: con las horas de inicio del evento anterior, al reintentar los pasos ya hechos
+        # salían con «✓ 15:00» (el rato desde entonces) y ese tiempo falso se guardaba como medición real
+        self.start = [0.0] * len(STEPS)
         self.cur, self.t0, self.frac = -1, time.monotonic(), -1.0
         for i in range(len(STEPS)):
             if i in self.unavailable:
@@ -790,10 +805,12 @@ class MainWindow(QMainWindow):
             p.set_off(i - 1 in self.steps_off)
             self.pills.append(p)
             steps.addWidget(p, 1)
-        if core.SYSTEM != "Darwin":                # la Selección IA usa la IA del Mac: aquí se dice, no «≈ 0 s»
-            self.pills[STEP_SEL].set_unavailable("Solo en Mac", "La Selección IA usa la IA del Mac: en este equipo "
-                                                               "todas las fotos pasan a DxO.")
-            self.timepanel.unavailable = {STEP_SEL: "solo en Mac"}
+        from . import seleccion
+        self.sel_engine = seleccion.engine()       # «mac» (IA de Apple), «win» (OpenCV, dentro de RawFlow) o «»
+        if not self.sel_engine:                    # este equipo no puede analizar las fotos: se dice, no «≈ 0 s»
+            self.pills[STEP_SEL].set_unavailable("No disponible", "La Selección IA no puede analizar las fotos en este "
+                                                 "equipo (falta su motor): todas las fotos pasan a DxO.")
+            self.timepanel.unavailable = {STEP_SEL: "no disponible"}
         al.addLayout(steps)
         self.progress = SlimProgress()
         al.addWidget(self.progress)
@@ -931,6 +948,7 @@ class MainWindow(QMainWindow):
 
     def _update_ready(self, path: str, err: str):
         info = getattr(self, "update_info", None) or {}
+        self._upd_dl = None                    # la descarga ya terminó (su hilo sigue vivo colgado de la ventana)
         if err or not path:
             self.btn_update.setEnabled(True)
             self.btn_update.setText(f"Actualizar a {info.get('version', '')}")
@@ -938,12 +956,20 @@ class MainWindow(QMainWindow):
             self._log(f"⚠ Actualización: {err}")
             self._update_summary()
             return
+        if self.pipe is not None and self.pipe.isRunning():   # jamás instalar (y cerrar RawFlow) con un evento en marcha
+            self.btn_update.setEnabled(True)
+            self.btn_update.setText(f"Actualizar a {info.get('version', '')}")
+            self._log("    Actualización descargada, pero hay un evento en marcha: se instala cuando la pidas otra vez.")
+            return
         from . import update
         try:
             update.install(Path(path))
         except Exception as e:  # noqa: BLE001
             self.btn_update.setEnabled(True)
+            self.btn_update.setText(f"Actualizar a {info.get('version', '')}")
+            self._update_summary()             # «Empezar» vuelve a estar disponible (se había apagado al descargar)
             self.status.setText(f"No se pudo abrir el instalador: {e}")
+            self._log(f"⚠ Actualización: no se pudo abrir el instalador: {e}")
             return
         self._log(f"Instalando RawFlow {info.get('version', '')}: RawFlow se cierra y se abre actualizada.")
         self.status.setText("Instalando… RawFlow se abrirá sola en un momento.")
@@ -1116,7 +1142,8 @@ class MainWindow(QMainWindow):
                 self.status.setText("No hay fotos RAW en las memorias seleccionadas.")
             else:
                 self.status.setText("Escribe el nombre del evento y pulsa Empezar.")
-        self.go.setEnabled(bool(files) and not scanning)
+        updating = self._updating()
+        self.go.setEnabled(bool(files) and not scanning and not updating)
         if files and not scanning:
             if getattr(self, "showing_result", False):          # otro evento: las comprobaciones del anterior se van
                 for p in self.pills:
@@ -1134,7 +1161,7 @@ class MainWindow(QMainWindow):
         if not self.countdown_left:
             self.go.setText(f"Empezar  ·  {len(files):,} fotos" if files else "Empezar")
         keys = tuple(sorted(k for k, c in self.cards.items() if c.selected and self.results.get(k)))
-        if (self.btn_auto.isChecked() and files and not scanning and not self.countdown_left
+        if (self.btn_auto.isChecked() and files and not scanning and not self.countdown_left and not updating
                 and keys and keys != self.autorun_keys):
             self.autorun_keys = keys
             self._begin_countdown()
@@ -1153,28 +1180,39 @@ class MainWindow(QMainWindow):
 
     def _begin_countdown(self):
         self.countdown_left = 3
+        self._countdown_id = getattr(self, "_countdown_id", 0) + 1     # cada cuenta atrás, la suya
         self.cancel.show()
         self.cancel.setText("No empezar")
         self.raise_()
         self.activateWindow()
-        self._countdown_tick()
+        self._countdown_tick(self._countdown_id)
 
-    def _countdown_tick(self):
-        if not self.countdown_left:
+    def _countdown_tick(self, cid: int = None):
+        # un «tic» que quedó pendiente de una cuenta atrás cancelada no cuenta en la siguiente (iba al doble de rápido)
+        if not self.countdown_left or (cid is not None and cid != getattr(self, "_countdown_id", cid)):
             return
         n = self._selected_files()
+        if not n:                                  # desmarcaste las tarjetas durante la cuenta atrás: no hay nada que empezar
+            self._stop_countdown()
+            return
         self.go.setText(f"Empieza solo en {self.countdown_left}…  ·  {len(n):,} fotos")
         self.status.setText("Autoejecutar: memoria con RAW detectada. Empieza sola.")
+        QTimer.singleShot(1000, lambda: self._countdown_next(cid))
+
+    def _countdown_next(self, cid: int = None):
+        """Pasó un segundo entero: 3 → 2 → 1 → empieza (antes el «1» no llegaba a verse: empezaba a los 2 s)."""
+        if not self.countdown_left or (cid is not None and cid != getattr(self, "_countdown_id", cid)):
+            return
         self.countdown_left -= 1
-        if self.countdown_left <= 0:
-            self.countdown_left = 0
-            self.cancel.setText("Cancelar")
-            self.cancel.hide()
-            n = len(self._selected_files())
-            self.go.setText(f"Empezar  ·  {n:,} fotos" if n else "Empezar")
-            self._start()
-        else:
-            QTimer.singleShot(1000, self._countdown_tick)
+        if self.countdown_left > 0:
+            self._countdown_tick(cid)
+            return
+        self.countdown_left = 0
+        self.cancel.setText("Cancelar")
+        self.cancel.hide()
+        n = len(self._selected_files())
+        self.go.setText(f"Empezar  ·  {n:,} fotos" if n else "Empezar")
+        self._start()
 
     def _stop_countdown(self):
         if self.countdown_left:
@@ -1373,14 +1411,14 @@ class MainWindow(QMainWindow):
             self._update_dest()                          # «3 Imagen AI» o «3 JPEG sin Imagen» en la vista previa
         self._log(f"Paso {i + 1} ({STEPS[i][0]}): {'desactivado' if i in self.steps_off else 'activado'} con doble clic")
         self._update_summary()
-        if i == STEP_SEL and core.SYSTEM != "Darwin":    # aquí no existe: se recuerda igual, pero se dice la verdad
-            msg = "La Selección IA solo funciona en Mac: en este equipo todas las fotos pasan a DxO."
+        if i == STEP_SEL and not getattr(self, "sel_engine", "x"):   # aquí no hay motor: se recuerda igual, pero se dice
+            msg = "La Selección IA no está disponible en este equipo: todas las fotos pasan a DxO."
         self.status.setText(msg)
 
     def _apply_off(self, est: List[float], n: int) -> List[float]:
         """Tiempo estimado sin los pasos desactivados (Imagen desactivado = solo Bridge)."""
         est = list(est)
-        if STEP_SEL in self.steps_off or core.SYSTEM != "Darwin":
+        if STEP_SEL in self.steps_off or not getattr(self, "sel_engine", "x"):
             est[STEP_SEL] = 0.0
         if STEP_IMG in self.steps_off and est[STEP_IMG] > 0:
             from . import timing
@@ -1393,9 +1431,18 @@ class MainWindow(QMainWindow):
         return est
 
     # ------------------------------------------------------------ secuencia
+    def _updating(self) -> bool:
+        """¿Se está descargando una actualización? Mientras, no se empieza un evento (al acabar la descarga RawFlow se
+        cierra para instalarse)."""
+        w = getattr(self, "_upd_dl", None)
+        try:
+            return w is not None and w.isRunning()
+        except RuntimeError:
+            return False
+
     def _start(self):
         files = self._selected_files()
-        if not files:
+        if not files or self._updating():
             return
         miss = self._missing_apps()
         if miss:
@@ -1413,19 +1460,37 @@ class MainWindow(QMainWindow):
         probe = dest
         while not probe.exists() and probe.parent != probe:
             probe = probe.parent
-        free = shutil.disk_usage(probe).free
+        try:
+            free = shutil.disk_usage(probe).free
+        except OSError:                    # el disco de destino no está (p. ej. un disco externo sin conectar):
+            self._stop_countdown()         # antes «Empezar» no hacía nada, sin decir por qué
+            self.status.setText(f"⚠ No encuentro el disco de «{self.base_dir}». Conéctalo o pulsa «Cambiar».")
+            QMessageBox.warning(self, APP_NAME, f"No se puede crear la carpeta del evento en:\n\n{self.base_dir}\n\n"
+                                "Ese disco no está conectado. Conéctalo, o pulsa «Cambiar» y elige otro sitio.")
+            return
         if free < need * 3.2:              # RAW + DNG (~1,8×) + JPEG
             r = QMessageBox.question(self, APP_NAME,
                                      f"Puede faltar espacio: necesitas ~{core.human_size(need * 3.2)} y quedan "
                                      f"{core.human_size(free)}. ¿Continuar?")
             if r != QMessageBox.StandardButton.Yes:
                 return
-        eject = [k for k, c in self.cards.items() if c.selected and k not in self.dropped]   # carpetas: nunca
+        eject = [k for k, c in self.cards.items() if c.selected and k not in self.dropped   # carpetas: nunca
+                 and not _inside(dest, k)]         # ni el disco donde se crea el evento (se quedaría sin destino)
         self._run(dest, files, eject, 0, copy_roots=self._copy_roots(dest))
 
     def _retry(self):
-        if self.last_event:
-            self._run(self.last_event, [], [], self.failed_step)
+        if not self.last_event:
+            return
+        job = getattr(self, "_move_job", None)
+        if self.failed_step == 0 and job and job[0] == self.last_event:
+            # Se detuvo (o lo cancelaste) MOVIENDO: seguir con las fotos que aún están en la memoria o en la carpeta.
+            # Antes el reintento daba el paso 1 por hecho con las que ya había y el evento seguía con la mitad.
+            ev, files, eject, roots = job
+            left = [f for f in files if os.path.exists(f.path)]
+            if left:
+                self._run(ev, left, [m for m in eject if os.path.exists(m)], 0, copy_roots=roots)
+                return
+        self._run(self.last_event, [], [], self.failed_step)
 
     # ------------------------------------------------------------ evento a medias
     def _remember_pending(self, ev: Path, step):
@@ -1486,10 +1551,25 @@ class MainWindow(QMainWindow):
             core.migrate_event_layout(event)           # evento de antes de 4.15: carpetas 1-5 (solo renombra)
         if files:
             self.run_n, self.run_bytes = len(files), sum(f.size for f in files)
+            self._move_job = (event, list(files), list(eject), set(copy_roots))   # por si se para moviendo (_retry)
+            try:                            # reintento del paso 1: las que ya se movieron antes también son del evento
+                raw = folders(event)[0]
+                if raw.is_dir():
+                    names = {os.path.basename(f.path).lower() for f in files}
+                    ya = [p for p in raw.iterdir()
+                          if p.suffix.lower() in core.RAW_EXTENSIONS and p.name.lower() not in names]
+                    self.run_n += len(ya)
+                    self.run_bytes += sum(p.stat().st_size for p in ya)
+            except OSError:
+                pass
         else:                               # reintento: contar lo que ya está en la carpeta
-            raw = folders(event)[0]
-            rs = [p for p in raw.glob("*") if p.suffix.lower() in core.RAW_EXTENSIONS]
-            self.run_n, self.run_bytes = len(rs), sum(p.stat().st_size for p in rs)
+            rs = core.good_raws(event)      # sueltas en «1 Original» o ya en «Fotos buenas» (si no, salían «0 fotos»)
+            self.run_n, self.run_bytes = len(rs), 0
+            for p in rs:
+                try:
+                    self.run_bytes += p.stat().st_size
+                except OSError:
+                    pass
         est = self.estimator.estimate_event(event if not files else None, self.run_n, self.run_bytes, start)
         est = self._apply_off(est, self.run_n)
         self._left_mode("run")
@@ -1520,7 +1600,7 @@ class MainWindow(QMainWindow):
         self.pipe.step.connect(self._log_step)
         self.pipe.finished_all.connect(self._log_end)
         self._log(f"=== EVENTO {event}  ({self.run_n} fotos, desde el paso {start + 1})")
-        # pantalla completa de proceso + ratón y teclado bloqueados hasta que termine
+        # pantalla completa de proceso (el ratón y el teclado ya NO se bloquean: solo se escucha Esc ×3 para cancelar)
         self.runscreen.target = self.screen()                  # la pantalla de proceso, donde está la ventana
         self.runscreen.open(event.name, f"{self.run_n:,} fotos  ·  {event}", start)
         for w in (self.runscreen, self.mini, self.curtain):     # Windows: no tapan lo que RawFlow lee por debajo
@@ -1530,8 +1610,9 @@ class MainWindow(QMainWindow):
                 self.runscreen.set_step(k, "off")
         self.runscreen.set_texts(status="Empezando…", detail="")
         self.hide()
-        if os.environ.get("RAWFLOW_SIN_BLOQUEO") != "1":       # solo pruebas: sin bloquear ratón ni teclado
-            self.runscreen.locked = self.inputlock.lock()
+        self.runscreen.esc = False
+        if os.environ.get("RAWFLOW_SIN_BLOQUEO") != "1":       # (pruebas: sin lanzar el ayudante que escucha el teclado)
+            self.runscreen.esc = self.inputlock.listen()       # Esc ×3 para cancelar; ratón y teclado quedan LIBRES
         from . import live, metrics                 # mediciones en vivo (programas, MB/s, CPU/GPU) y batería
         live.reset()
         self.runscreen.set_power("")
@@ -1579,8 +1660,10 @@ class MainWindow(QMainWindow):
         except RuntimeError:                   # el aviso anterior ya se cerró (objeto de Qt borrado)
             pass
         self.toast = EjectToast(items)
+        self.toast.target = getattr(self.runscreen, "target", None)   # en la pantalla donde está la de proceso
         self.toast.popup()
         set_level(self.toast, LEVEL_TOAST)
+        hide_from_capture(self.toast)          # Windows: se queda hasta sacar la memoria; que no tape lo que se lee
 
     def _on_step(self, i: int, state: str):
         self.pills[i].set(state)
@@ -1675,7 +1758,9 @@ class MainWindow(QMainWindow):
                                  f"faltan {fmt_est(left)}" if left > 1 else "terminando…", f"termina {end_phrase(left)}",
                                  el / (el + left) if el + left > 0 else 0.0)
 
-    LOW_POWER_TXT = "Modo de bajo consumo activado: todo va más lento  ·  desactívalo en Ajustes del Sistema → Batería"
+    LOW_POWER_TXT = ("Modo de bajo consumo activado: todo va más lento  ·  desactívalo en Ajustes del Sistema → Batería"
+                     if sys.platform == "darwin" else                # en Windows es el plan de energía, no «Ajustes del Sistema»
+                     "Plan de energía en «Ahorro»: todo va más lento  ·  cámbialo en Configuración → Sistema → Energía")
 
     def _low_power_tick(self):
         """Con el cargador puesto: si el modo de bajo consumo está activado (macOS frena CPU y GPU), aviso en la
@@ -1730,14 +1815,15 @@ class MainWindow(QMainWindow):
 
     @Slot(bool)
     def _lock_state(self, on: bool):
-        """El bloqueo se puso o se quitó: la pantalla de proceso dice la verdad (candado y «Esc tres veces»)."""
-        self.runscreen.locked = bool(on) and self.pipe is not None
+        """La escucha de Esc ×3 empezó o terminó: la pantalla de proceso solo enseña «para cancelar, pulsa Esc tres
+        veces» mientras de verdad funciona."""
+        self.runscreen.esc = bool(on) and self.pipe is not None
         self.runscreen.update()
 
     @Slot()
     def _lock_cancel(self):
-        """Esc ×3 durante el proceso: cancelar (el bloqueo ya se soltó)."""
-        self.runscreen.locked = False
+        """Esc ×3 durante el proceso: cancelar."""
+        self.runscreen.esc = False
         self.runscreen.set_texts(status="Cancelando…", detail="Esc pulsado tres veces")
         if self.pipe:
             self.pipe.stop()
@@ -1747,7 +1833,7 @@ class MainWindow(QMainWindow):
         self.pipe = None
         self.clock.stop()
         self.inputlock.release()
-        self.runscreen.locked = False
+        self.runscreen.esc = False
         self.power_timer.stop()
         self.runscreen.set_power("")
         if self.sampler is not None:
@@ -1892,7 +1978,7 @@ class MainWindow(QMainWindow):
         if self.pipe is not None and self.pipe.isRunning():
             self.pipe.stop()
         try:
-            self.inputlock.release()          # ratón y teclado libres, pase lo que pase
+            self.inputlock.release()          # el ayudante que escucha Esc ×3 no se queda vivo
         except Exception:  # noqa: BLE001
             pass
         if getattr(self, "sampler", None) is not None:

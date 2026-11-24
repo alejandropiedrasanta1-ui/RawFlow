@@ -474,12 +474,18 @@ def _create_project(s: Screen, dng_dir: Path, project: str, photo_type: str, pfi
         time.sleep(0.8)
     _remember(project)
     pfile.write_text(project, encoding="utf-8")          # si se corta aquí, el reintento lo busca antes de crear otro
-    s.tap(photo_type, exact=True, timeout=10)
-    s.tap("guiente", timeout=10, pick=-1, after=1.2)      # «Siguiente»
-    s.wait("Perfil IA", "Selección con IA", timeout=30)
-    s.tap("guiente", timeout=10, pick=-1, after=1.2)
-    s.wait("Herramientas seleccionadas", "Herramientas IA", timeout=30)
-    s.tap("crear proyecto", timeout=10, pick=-1, after=2.5)
+    try:
+        s.tap(photo_type, exact=True, timeout=10)
+        s.tap("guiente", timeout=10, pick=-1, after=1.2)      # «Siguiente»
+        s.wait("Perfil IA", "Selección con IA", timeout=30)
+        s.tap("guiente", timeout=10, pick=-1, after=1.2)
+        s.wait("Herramientas seleccionadas", "Herramientas IA", timeout=30)
+        s.tap("crear proyecto", timeout=10, pick=-1, after=2.5)
+    except UIError:
+        # No se llegó a pulsar «Crear proyecto»: ese proyecto NO existe. Sin borrar la marca, cada reintento lo
+        # buscaba en la lista, no lo encontraba y el evento se quedaba sin salida hasta borrar el archivo a mano.
+        pfile.unlink(missing_ok=True)
+        raise
     pfile.write_text(project, encoding="utf-8")
     log(f"Imagen: subiendo y editando «{project}»…")
     return project

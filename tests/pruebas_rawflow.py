@@ -32,9 +32,25 @@ DNG_IMAGEN = b"DNG+imagen " + core.IMAGEN_MARK     # DNG ya editado por Imagen (
 JPG_IMAGEN = b"J" * 1000 + b" " + core.IMAGEN_MARK  # JPEG de Bridge con las ediciones de Imagen
 
 
-def prueba(titulo: str):
+class Saltada(Exception):
+    """La prueba no aplica en este sistema (p. ej. un recorrido que solo existe en el Mac): no cuenta como fallo."""
+
+
+SOLO_MAC = sys.platform != "darwin"
+
+
+def prueba(titulo: str, solo_mac: str = ""):
+    """`solo_mac`: motivo por el que la prueba solo tiene sentido en el Mac; en otro sistema sale como «saltada»."""
     def deco(fn):
-        PRUEBAS.append((titulo, fn))
+        if solo_mac:
+            def envuelta():
+                if SOLO_MAC:
+                    raise Saltada(f"solo Mac: {solo_mac}")
+                return fn()
+            envuelta.__name__ = fn.__name__
+            PRUEBAS.append((titulo, envuelta))
+        else:
+            PRUEBAS.append((titulo, fn))
         return fn
     return deco
 
@@ -150,7 +166,7 @@ def p05():
     assert not (ev / core.OUTPUT_SUBFOLDER / core.APARTADAS).exists(), "no deja marcas en la carpeta"
 
 
-@prueba("Bridge se deja una foto sin exportar: reintenta solo esa y, si no sale, sigue con el resto")
+@prueba("Bridge se deja una foto sin exportar: reintenta solo esa y, si no sale, sigue con el resto", solo_mac="Imagen por tandas mientras DxO trabaja")
 def p06():
     from rawflow import imagen_ui
     ev = td._evento_tandas(8)
@@ -326,12 +342,18 @@ def p17():
 
 @prueba("Memoria con una foto que no se puede leer: se copian las demás, esa se queda en la memoria y se avisa")
 def p18():
-    if os.geteuid() == 0:
-        return
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        raise Saltada("como administrador (root) todo se puede leer")
     card, ev = td.fresh("p18_memoria"), td.fresh("p18_evento")
     files = [td.raw(card, f"DSC{1000 + i}.ARW", i) for i in range(6)]
     mala = Path(files[2].path)
-    os.chmod(mala, 0)                                         # ilegible, como un sector dañado
+    candado = None
+    if sys.platform == "win32":                               # Windows: chmod no quita la lectura; se bloquea
+        import msvcrt
+        candado = open(mala, "rb")
+        msvcrt.locking(candado.fileno(), msvcrt.LK_NBLCK, mala.stat().st_size)
+    else:
+        os.chmod(mala, 0)                                     # ilegible, como un sector dañado
     from rawflow.pipeline import Pipeline
     try:
         with td._Falsos():
@@ -340,7 +362,11 @@ def p18():
             p = Pipeline(ev, files, DXO, "CINEMA", [], 0)
             p._run_steps()
     finally:
-        os.chmod(mala, 0o644)
+        if candado:
+            msvcrt.locking(candado.fileno(), msvcrt.LK_UNLCK, mala.stat().st_size)
+            candado.close()
+        else:
+            os.chmod(mala, 0o644)
     assert "failed_step" not in p.summary, p.summary
     assert mala.exists(), "la foto que no se pudo leer tiene que seguir en la memoria"
     assert any("DSC1002" in a for a in p.summary.get("avisos", [])), p.summary
@@ -392,7 +418,7 @@ def p20():
     assert finales(ev) == list(range(1, 10))
 
 
-@prueba("Falta una foto de Bridge al llegar a Retouch4me: vuelve SOLO a Bridge por ella y sigue, sin pararse")
+@prueba("Falta una foto de Bridge al llegar a Retouch4me: vuelve SOLO a Bridge por ella y sigue, sin pararse", solo_mac="Imagen por tandas mientras DxO trabaja")
 def p21():
     ev = td._evento_tandas(6)
     dngs = con_dng_y_jpg(ev, 6)
@@ -629,7 +655,7 @@ def p32():
         assert not malas, malas
 
 
-@prueba("Cerrar todo: los ayudantes huérfanos de Imagen/Retouch4me se cierran; con la app abierta, nada suyo")
+@prueba("Cerrar todo: los ayudantes huérfanos de Imagen/Retouch4me se cierran; con la app abierta, nada suyo", solo_mac="procesos del Mac (ps) de ImagenAI")
 def p33():
     import subprocess as sp
 
@@ -717,7 +743,7 @@ def _cerrar_todo(abiertas, vm_ocupada=False, vm_tarda=False):
     return hecho
 
 
-@prueba("Cerrar todo: Windows (UTM) se apaga BIEN antes de cerrar UTM; si RawFlow instala una máquina, ni se toca")
+@prueba("Cerrar todo: Windows (UTM) se apaga BIEN antes de cerrar UTM; si RawFlow instala una máquina, ni se toca", solo_mac="Windows en UTM")
 def p35():
     h = _cerrar_todo(["Finder", "Claude", "UTM", "Safari", "QuickTime Player"])
     assert sorted(h["cerrar"]) == ["Claude", "QuickTime Player", "Safari", "UTM"], h       # todo menos el Finder
@@ -764,7 +790,7 @@ def p37():
 
 # ======================================================================= candado de Imagen (JUTIAPA, 22-nov-2026)
 @prueba("JUTIAPA: Imagen «terminó» la tanda 1 pero sus ediciones no llegaron a los DNG → NADA pasa a Bridge ni a "
-        "Retouch4me sin Imagen: esas fotos se piden otra vez y TODAS las finales llevan Imagen")
+        "Retouch4me sin Imagen: esas fotos se piden otra vez y TODAS las finales llevan Imagen", solo_mac="Imagen por tandas mientras DxO trabaja")
 def p38():
     from rawflow import imagen_ui as iu, retouch_engine as re_
     ev = td._evento_tandas(30)
@@ -920,7 +946,7 @@ def p40():
 
 
 @prueba("Retouch4me JAMÁS recibe una foto sin Imagen: un JPEG de «Imagen AI» sin sus ediciones hace volver al paso 3, "
-        "esa foto se rehace con Imagen y solo entonces se retoca")
+        "esa foto se rehace con Imagen y solo entonces se retoca", solo_mac="Imagen por tandas mientras DxO trabaja")
 def p41():
     from rawflow import retouch_engine as re_
     ev = td._evento_tandas(6)
@@ -944,7 +970,7 @@ def p41():
 
 
 @prueba("Evento YA TERMINADO con finales sin Imagen (como JUTIAPA, la 1 y la 2): «Reintentar desde el paso 3» rehace "
-        "SOLO esas con Imagen, conservan su número, las demás no se tocan y el video se vuelve a hacer")
+        "SOLO esas con Imagen, conservan su número, las demás no se tocan y el video se vuelve a hacer", solo_mac="Imagen por tandas mientras DxO trabaja")
 def p42():
     from rawflow import pipeline as pl
     ev = td._evento_tandas(8)
@@ -1023,6 +1049,7 @@ def p44():
         td.write(dngs.parent / core.IMAGEN_SUBFOLDER / f"DSC{1000 + i}.jpg", jpeg_xmp(f"DSC{1000 + i}.ARW", True))
         td.write(fin / f"{i + 1}.jpg", jpeg_xmp(f"DSC{1000 + i}.ARW", True))
     p = pl.Pipeline(ev, [], DXO, "CINEMA", [], 0)
+    p._imagen_app = lambda: True                                        # Imagen por su app (Mac o Windows)
     p._audit_imagen()                                                   # todas bien: nada
     (fin / "3.jpg").write_bytes(b"sin metadatos")                       # Retouch4me no dejó el XMP: vale
     p._audit_imagen()
@@ -1062,6 +1089,9 @@ def p45():
             exportadas.append((sub, Path(out_dir).name))
             return Path(out_dir)
         f._set(iu, "bridge_only", bridge_only)
+        if sys.platform == "win32":                                    # Windows: Bridge por imagen_win
+            from rawflow import imagen_win as iw
+            f._set(iw, "bridge_only", bridge_only)
         p, estados = _correr_off(ev, 2, {3})
     assert "failed_step" not in p.summary, p.summary
     assert f.subidas == [] and f.ediciones == [] and f.bridges == [], (f.subidas, f.ediciones, f.bridges)
@@ -1333,6 +1363,7 @@ def p55():
     d2 = con_dng_y_jpg(ev2, 4)
     (d2.parent / core.IMAGEN_SUBFOLDER / "DSC1001.jpg").write_bytes(b"J" * 1000)
     q = Pipeline(ev2, [], DXO, "CINEMA", [], 0)
+    q._imagen_app = lambda: True                                      # Imagen por su app (Mac o Windows)
     vistos.clear()
     q.check.connect(lambda i, st, txt, corto: vistos.append((i, st, corto)))
     q._verify_step(3, "done")
@@ -1511,7 +1542,7 @@ def p60():
 
 
 @prueba("Al ABRIR RawFlow todo empieza cerrado: UTM (con Windows apagado bien antes) y DxO, Imagen, Bridge, Retouch4me "
-        "o CineSlide que quedaran abiertos; UTM solo sigue si RawFlow está instalando una máquina virtual")
+        "o CineSlide que quedaran abiertos; UTM solo sigue si RawFlow está instalando una máquina virtual", solo_mac="Windows en UTM y apps del Mac")
 def p61():
     from rawflow import pipeline as pl, vm_programas as vp
     abiertas = {"UTM", "ImagenAI", "Safari"}
@@ -1653,7 +1684,7 @@ def p64():
 
 
 @prueba("Selección IA: las caras que Vision no vio en una toma se buscan otra vez en su sitio («rfui caras»): la "
-        "encontrada se compara (sin repetir la que ya estaba) y la que no aparece queda como tapada")
+        "encontrada se compara (sin repetir la que ya estaba) y la que no aparece queda como tapada", solo_mac="ayudante rfui (Vision)")
 def p65():
     from rawflow import seleccion as S
     import json as _json
@@ -1683,7 +1714,7 @@ def p65():
 
 
 def main() -> int:
-    ok = 0
+    ok = saltadas = 0
     print(f"PRUEBAS DE RAWFLOW ({len(PRUEBAS)} casos)\n")
     for n, (titulo, fn) in enumerate(PRUEBAS, 1):
         t0 = time.monotonic()
@@ -1691,12 +1722,18 @@ def main() -> int:
             fn()
             print(f"  ✓ Prueba {n:>2}: {titulo}  ({time.monotonic() - t0:.1f} s)")
             ok += 1
+        except Saltada as s:
+            print(f"  – Prueba {n:>2}: {titulo}  [saltada: {s}]")
+            saltadas += 1
         except Exception:  # noqa: BLE001
-            print(f"  ✗ Prueba {n:>2}: {titulo}")
+            print(f"  ✗ Prueba {n:>2}: {titulo}", flush=True)
             traceback.print_exc()
+            sys.stderr.flush()
     shutil.rmtree(td.TMP, ignore_errors=True)
-    print(f"\n{ok} de {len(PRUEBAS)} pruebas bien")
-    return 0 if ok == len(PRUEBAS) else 1
+    fallos = len(PRUEBAS) - ok - saltadas
+    print(f"\n{ok} de {len(PRUEBAS)} pruebas bien" + (f" · {saltadas} saltadas" if saltadas else "")
+          + f" · {fallos} fallos")
+    return 0 if fallos == 0 else 1
 
 
 if __name__ == "__main__":

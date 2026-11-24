@@ -18,7 +18,6 @@ Las carpetas finales quedan igual que sin tandas.
 from __future__ import annotations
 
 import os
-import threading
 import time
 from pathlib import Path
 from typing import List
@@ -87,7 +86,8 @@ def resume_step(ev: Path, off=()):
         return None
     done = core.processed_stems(dngs)
     sueltas = [q for q in goods if q.parent == raw and q.stem.lower() not in done]
-    if sueltas and STEP_SEL not in off and core.SYSTEM == "Darwin":
+    from . import seleccion
+    if sueltas and STEP_SEL not in off and seleccion.engine():
         return STEP_SEL, "separar las fotos buenas y malas"
     aparte = set(core.apartadas(ev))
     want = {q.stem.lower() for q in goods} - aparte
@@ -383,6 +383,19 @@ def restore_stage_manager():
         _SM_FLAG.unlink(missing_ok=True)
 
 
+def _rename(src: Path, dst: Path, tries: int = 6):
+    """Renombrar aguantando un bloqueo pasajero de Windows (el antivirus o las miniaturas del Explorador tienen el
+    archivo recién escrito abierto un instante): unos reintentos cortos antes de darlo por fallido."""
+    for k in range(tries):
+        try:
+            src.rename(dst)
+            return
+        except PermissionError:
+            if k == tries - 1 or core.SYSTEM != "Windows":
+                raise
+            time.sleep(0.4)
+
+
 class Pipeline(QThread):
     step = Signal(int, str)            # índice, "run" | "done" | "skip" | "error"
     status = Signal(str)
@@ -516,7 +529,14 @@ class Pipeline(QThread):
             except Exception as e:  # noqa: BLE001
                 if self._stop or str(e) == "Cancelado." or isinstance(e, LaneFailed):
                     raise
-                if str(e).startswith(("No encuentro", "RawFlow necesita permiso", "PureRAW no admite")):
+                msg = str(e)
+                fatal = msg.startswith(("No encuentro", "RawFlow necesita permiso", "PureRAW no admite"))
+                if fatal and core.SYSTEM == "Windows" and msg.startswith((
+                        "No encuentro la ventana", "No encuentro «Proyectos»", "No encuentro la calidad",
+                        "No encuentro el botón")):
+                    fatal = False                          # Windows: la pantalla no se leyó bien UNA vez (no falta
+                    #                                        ninguna app): eso sí se arregla reintentando
+                if fatal:
                     raise                                  # falta una app o un permiso: reintentar no sirve
                 if k == tries:                             # último intento: apartar lo que no sale y SEGUIR
                     state = self._salvage(i, e)
@@ -538,7 +558,9 @@ class Pipeline(QThread):
         import shutil
         raw, dngs, img, final = self._f()
         why = str(err).splitlines()[0][:100]
-        n_all = len([p for p in raw.glob("*") if p.suffix.lower() in core.RAW_EXTENSIONS]) if raw.is_dir() else 0
+        # todas las del evento: sueltas en «1 Original» o ya en «Fotos buenas» (contando solo las sueltas, tras la
+        # Selección IA salía 0 y nunca se apartaba nada: una sola foto que fallara paraba el evento entero)
+        n_all = len(core.good_raws(self.ev_dir))
 
         def few(k: int) -> bool:
             """¿Son fotos sueltas? (si fallan muchas es que algo no funciona: mejor parar y reintentar ese paso).
@@ -598,9 +620,20 @@ class Pipeline(QThread):
         import subprocess
         if core.SYSTEM == "Windows":
             if i == STEP_DXO:                        # DxO en Windows: cerrar PureRAW para reintentar
-                subprocess.run(["taskkill", "/F", "/IM", "PureRAW*"], capture_output=True,
-                               creationflags=0x08000000)
+                try:
+                    subprocess.run(["taskkill", "/F", "/IM", "PureRAW*"], capture_output=True, timeout=30,
+                                   creationflags=0x08000000)
+                except (OSError, subprocess.SubprocessError):
+                    pass
                 time.sleep(2)
+            elif i == STEP_IMG:                      # Imagen/Bridge en Windows: cerrarlos para reintentar limpio (un
+                try:                                 # Bridge que sigue exportando tenía abiertos los JPEG a rehacer)
+                    from . import imagen_win
+                    if not imagen_win.no_apps():     # (en pruebas no se toca ninguna app de verdad)
+                        imagen_win.close_app(imagen_win.BRIDGE_EXE)
+                        imagen_win.close_app(imagen_win.EXE)
+                except Exception:  # noqa: BLE001
+                    pass
             return
         if core.SYSTEM != "Darwin":
             return
@@ -903,8 +936,8 @@ class Pipeline(QThread):
                     res = ("off", f"desactivada · pasan las {len(goods):,}", "pasan todas")
                 elif state == "skip":
                     res = ("off", "omitida en este equipo", "omitida")
-                elif state == "off":                    # en Windows no existe (usa la IA del Mac): no «✓ N buenas»
-                    res = ("off", f"solo en Mac · pasan las {len(goods):,}", "solo en Mac")
+                elif state == "off":                    # este equipo no puede analizar las fotos: no «✓ N buenas»
+                    res = ("off", f"no disponible aquí · pasan las {len(goods):,}", "no disponible")
                 else:
                     res = ("ok", f"{len(goods):,} buenas · {n_bad:,} malas (en «{RAW_DIR}/{core.BAD_SUBFOLDER}», "
                                  "con su motivo)", f"{len(goods):,} buenas · {n_bad:,} malas")
@@ -1039,6 +1072,10 @@ class Pipeline(QThread):
         raw, *_ = self._f()
         if not self.files:
             if any(raw.glob("*")):
+                if self.start_at == STEP_MOVE:    # se retoma un evento que se paró MOVIENDO, ya sin la memoria delante
+                    n = len(core.good_raws(self.ev_dir))
+                    self._warn(f"El paso 1 se había quedado a medias: el evento sigue con las {n:,} fotos que ya "
+                               f"estaban en «{RAW_DIR}». Si quedaron fotos en la memoria, no están incluidas.")
                 return "skip"
             raise RuntimeError("No hay fotos RAW para mover.")
         total = sum(f.size for f in self.files) or 1
@@ -1086,9 +1123,13 @@ class Pipeline(QThread):
         if st.failed:
             if not st.copied + st.skipped:        # no se pudo leer nada: la memoria no responde
                 raise RuntimeError(f"{st.failed} fotos no se pudieron copiar:\n" + "\n".join(st.errors[:8]))
-            names = [e.split(":")[0] for e in st.errors][:5]
+            names = [e.split(":")[0] for e in st.errors if "no se pudo borrar" not in e][:5]
             self._warn(f"{st.failed} foto(s) no se pudieron leer de la memoria y siguen en ella "
                        f"({', '.join(names)}): el resto del evento sigue sin ellas.")
+        sin_borrar = [e for e in st.errors if "no se pudo borrar" in e]
+        if sin_borrar:                            # copiadas, pero la memoria no deja borrar (seguro puesto, protegidas…)
+            self._warn(f"{len(sin_borrar)} foto(s) se copiaron bien pero siguen también en la memoria (no deja "
+                       "borrarlas: ¿tiene el seguro puesto o están protegidas?). Bórralas tú antes de reutilizarla.")
         out, bad, items = [], [], []
         for mp in self.eject:                     # soltar la memoria en cuanto se sacaron las fotos
             self.detail.emit(f"Expulsando {Path(mp).name}…")
@@ -1112,15 +1153,16 @@ class Pipeline(QThread):
 
     # ---- 2
     def _select(self):
-        """2 · Selección IA (solo Mac): dentro de «1 Original», las tomas malas (y las repetidas) a «Fotos malas», con su
-        motivo (nunca se borran), y las buenas a «Fotos buenas». DxO, Imagen, Bridge y Retouch4me SOLO trabajan con
-        las buenas. Si la IA falla, NO para el evento: pasan todas como buenas."""
+        """2 · Selección IA (Mac: IA de Apple; Windows: OpenCV, ver seleccion.engine): dentro de «1 Original», las tomas
+        malas (y las repetidas) a «Fotos malas», con su motivo (nunca se borran), y las buenas a «Fotos buenas». DxO,
+        Imagen, Bridge y Retouch4me SOLO trabajan con las buenas. Si la IA falla, NO para el evento: pasan todas."""
         from . import seleccion
         raw, dngs, *_ = self._f()
         good = raw / core.GOOD_SUBFOLDER
         top = sorted(q for q in raw.iterdir() if q.is_file() and q.suffix.lower() in core.RAW_EXTENSIONS
                      and not q.name.startswith(".")) if raw.is_dir() else []
-        off = STEP_SEL in self.off or core.SYSTEM != "Darwin"
+        motor = seleccion.engine()                     # «mac», «win» o «» (este equipo no puede analizar)
+        off = STEP_SEL in self.off or not motor
         if not top:
             if good.is_dir():
                 self.detail.emit("Las fotos ya estaban separadas en buenas y malas.")
@@ -1133,12 +1175,14 @@ class Pipeline(QThread):
         done = core.processed_stems(dngs)
         dec = {}
         try:
-            from .imagen_ui import _rfui
-            rf = _rfui()
+            rf = None                                  # Windows: sin ayudante (seleccion_win, dentro de RawFlow)
+            if motor == "mac":
+                from .imagen_ui import _rfui
+                rf = _rfui()
             n_new = len([q for q in top if q.stem.lower() not in done])
             self.status.emit(f"Selección IA: separando {n_new:,} fotos en buenas y malas…")
             self.progress.emit(0.0)
-            live.set("ia", f"analizando {n_new:,} fotos con la IA del Mac")
+            live.set("ia", f"analizando {n_new:,} fotos" + (" con la IA del Mac" if motor == "mac" else ""))
             dec = seleccion.run(raw, rf, done, self.detail.emit, self.stopped, self.progress.emit)
         except Exception as e:  # noqa: BLE001
             if self._stop or str(e) == "Cancelado.":
@@ -1161,17 +1205,21 @@ class Pipeline(QThread):
             raise RuntimeError("No encuentro DxO PureRAW (necesario para crear los DNG).")
         preset = core.ensure_preset_first(self.dxo_path, self.preset, destination=dngs)
         ok_ext = core.dxo_extensions(self.dxo_path)
-        raw_dir = core.raw_dir(self.ev_dir)
-        other = sorted(p.name for p in raw_dir.iterdir()
-                       if p.is_file() and p.suffix.lower() in core.RAW_EXTENSIONS and p.suffix.lower() not in ok_ext)
+        # (también los de «Fotos buenas»: tras la Selección IA ya no quedan sueltos en «1 Original»)
+        other = sorted(p.name for p in core.good_raws(self.ev_dir) if p.suffix.lower() not in ok_ext)
         if other:
             exts = ", ".join(sorted({Path(n).suffix.upper() for n in other}))
             self.summary["dxo_unsupported"] = other
             self.detail.emit(f"{len(other)} RAW ({exts}) no son compatibles con PureRAW: se quedan en «Original».")
+        core.kill_pureraw_batches()       # un lote anterior de RawFlow vivo haría que PureRAW ignore el nuevo (y
+        #                                   seguiría escribiendo DNG mientras aquí se mira cuáles faltan)
         n_rec = core.collect_dxo_dngs(self.ev_dir)    # Windows: DNG que PureRAW dejó junto a los RAW → «2 DNGs»
         if n_rec:
             self.detail.emit(f"{n_rec} DNG que DxO dejó junto a los originales: pasan a «{DNG_DIR}».")
+        n_cut = core.remove_partial_dxo_dngs(self.ev_dir)   # Windows: DNG a medias junto a su RAW (DxO se cortó)
         broken = core.remove_broken_dngs(dngs)        # DNG cortados de un intento anterior: se rehacen
+        if n_cut:
+            self.detail.emit(f"{n_cut} DNG a medias que DxO dejó junto a los originales: se vuelven a hacer.")
         if broken:
             self.detail.emit(f"{len(broken)} DNG cortados de un intento anterior: se vuelven a hacer.")
         raws = core.pending_raws(self.ev_dir, exts=ok_ext)
@@ -1184,7 +1232,6 @@ class Pipeline(QThread):
         self.work[STEP_DXO] = (len(stems), _bytes(raws))   # al reanudar, DxO solo hace las que faltan
         tsize = self._tanda_plan(dngs, raws)          # evento grande: Imagen sube por tandas mientras DxO trabaja
         self.status.emit(f"DxO procesando {len(stems):,} fotos con {preset}…")
-        core.kill_pureraw_batches()       # un lote anterior de RawFlow vivo haría que PureRAW ignore el nuevo
         batch = core.start_pureraw_batch(self.dxo_path, raws)
         if not tsize:                     # (por tandas, Imagen se abre al crear el primer proyecto)
             extra = [] if (_engine_ok() or STEP_RET in self.off) else _bridge_and_arams()[1:]
@@ -1236,7 +1283,9 @@ class Pipeline(QThread):
                     clk["shown"] = done
                     eta = ""
                     if done:
-                        per = (now - first_t) / (done - 1) if done >= 2 else (now - t0)
+                        # (varios DNG vistos a la vez la primera vez: sin esto salía «0.0 s por foto» y «faltan 0»)
+                        per = ((now - first_t) / (done - 1) if done >= 2 and now - first_t > 1
+                               else (now - t0) / done)
                         r = int(per * (total - done))
                         eta = f"  ·  {per:.1f} s por foto" + (f"  ·  quedan {r // 60}:{r % 60:02d}" if r else "")
                         live.set("dxo", f"{done:,} de {total:,} DNG  ·  {per:.1f} s/foto  ·  DeepPRIME XD3")
@@ -1566,7 +1615,13 @@ class Pipeline(QThread):
             try:                                      # ya numeradas y falta alguna: que se llamen como su foto,
                 self._unnumber_finals(final, {p.stem.lower(): p for p in src})   # así SOLO se hace la que falta
             except RuntimeError:
-                pass
+                # No se sabe de qué foto es cada final numerada: se rehacen TODAS. Las numeradas de antes se quitan:
+                # si se quedaran, al numerar otra vez se juntarían con las nuevas y cada foto saldría DOS veces.
+                viejas = [p for p in final.glob("*.jp*g") if p.stem.isdigit()]
+                for p in viejas:
+                    p.unlink(missing_ok=True)
+                self.detail.emit(f"No se sabe de qué foto es cada una de las {len(viejas)} finales numeradas: "
+                                 "se rehacen todas (sin duplicar ninguna).")
         hechas = {p.stem.lower() for p in final.glob("*.jp*g")} if final.is_dir() else set()
         todo = [p for p in src if p.stem.lower() not in hechas]
         self.work[STEP_RET] = (len(todo), _bytes(todo))   # el motor se salta las que ya estaban retocadas
@@ -1612,11 +1667,20 @@ class Pipeline(QThread):
                 pass
         nat = lambda t: [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", t.lower())]  # noqa: E731
         fotos.sort(key=lambda p: (cuando.get(p.stem.lower(), float("inf")), nat(p.stem)))
-        tmp = []
-        for i, p in enumerate(fotos, 1):              # en dos pasos para no pisar nombres que ya fueran números
-            t = p.with_name(f".rf-{i}{p.suffix.lower()}")
-            p.rename(t)
-            tmp.append(t)
+        tmp, hechos = [], []
+        try:
+            for i, p in enumerate(fotos, 1):          # en dos pasos para no pisar nombres que ya fueran números
+                t = p.with_name(f".rf-{i}{p.suffix.lower()}")
+                _rename(p, t)
+                hechos.append((p, t))
+                tmp.append(t)
+        except OSError:                               # una no se deja renombrar: todas vuelven a su nombre (si no,
+            for p, t in reversed(hechos):             # quedaban ocultas como «.rf-N» y se retocaban otra vez)
+                try:
+                    t.rename(p)
+                except OSError:
+                    pass
+            raise
         for i, t in enumerate(tmp, 1):
-            t.rename(final / f"{i}{t.suffix}")
+            _rename(t, final / f"{i}{t.suffix}")
         self.detail.emit(f"Fotos finales numeradas del 1 al {len(tmp)}.")

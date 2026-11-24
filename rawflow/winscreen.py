@@ -6,8 +6,8 @@ Las apps que maneja RawFlow (ImagenAI, Adobe Bridge) no dejan leer sus botones p
 se leen como en el Mac: captura de pantalla + OCR, y los botones se encuentran por su rótulo, no por coordenadas.
 
 Todo va en píxeles reales del escritorio virtual (varias pantallas, también con coordenadas negativas). Los clics y
-teclas se mandan con SendInput: llevan la marca «inyectado», así que pasan aunque RawFlow tenga bloqueados el ratón
-y el teclado físicos (rawflow/winlock.py).
+teclas se mandan con SendInput: llevan la marca «inyectado», así que no cuentan para el «Esc ×3» que escucha
+rawflow/winlock.py (el ratón y el teclado físicos ya no se bloquean).
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from typing import List, Optional, Tuple
 
 if sys.platform == "win32":
     user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetForegroundWindow.restype = wintypes.HWND      # (sin esto, un identificador de ventana alto salía negativo)
     gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 

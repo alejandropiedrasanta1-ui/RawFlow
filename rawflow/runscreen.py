@@ -1,8 +1,8 @@
 """Pantalla de proceso de RawFlow: ocupa TODA la pantalla mientras trabaja (por encima de la barra de menús
 y del Dock), tapa DxO, Imagen, Bridge y Retouch4me y enseña en grande qué paso va, cuánto falta y qué hace.
 
-No recibe clics ni el foco (RawFlow maneja las apps de debajo); el ratón y el teclado físicos los bloquea
-inputlock.py. Todo se dibuja a mano a ~60 fps con animaciones suaves.
+No recibe clics ni el foco (RawFlow maneja las apps de debajo). El ratón y el teclado ya NO se bloquean (23-nov-2026);
+inputlock.py solo escucha «Esc tres veces» para cancelar. Todo se dibuja a mano a ~60 fps con animaciones suaves.
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ class RunScreen(QWidget):
         self.elapsed, self.left, self.end = "", "", ""
         self.overall, self.shown = 0.0, 0.0
         self.step_frac = -1.0
-        self.locked = False
+        self.esc = False                  # True: se está escuchando «Esc ×3» (se enseña cómo cancelar)
         self.eco = False
         self.power = ""                   # aviso de batería («Conecta el cargador…»), vacío si va con cargador
         self._closing = False
@@ -183,7 +183,7 @@ class RunScreen(QWidget):
         animating = (self.fin is not None or t < 0.6 or now - self.detail_t < 0.45
                      or any(c and now - c < 0.8 for c in self.changed) or abs(self.overall - self.shown) > 0.002)
         key = (W, H, tuple(self.state), tuple(self.times), self.left, self.elapsed, self.end, self.status,
-               self.detail, self.ev_name, self.subtitle, self.locked, round(self.shown, 3), int(t),
+               self.detail, self.ev_name, self.subtitle, self.esc, round(self.shown, 3), int(t),
                round(self.step_frac, 2), self.power)
         if animating or self._base is None or key != self._base_key:
             self._base, self._base_key = self._render_base(W, H, t, now), key
@@ -221,15 +221,14 @@ class RunScreen(QWidget):
         p.setPen(QColor(T.TEXT))
         p.setFont(self._f(24, QFont.Weight.ExtraBold, spacing=4))
         p.drawText(QRectF(68, 32, 400, 36), Qt.AlignmentFlag.AlignVCenter, "RAWFLOW")
-        if self.locked:
-            self._lock_badge(p, W, t)
         if self.power and not self.fin:
             self._power_banner(p, W)
 
         # evento
         p.setPen(QColor(T.TEXT))
         p.setFont(self._f(min(52, H * 0.058), QFont.Weight.Bold))
-        p.drawText(QRectF(0, H * 0.085, W, 70), Qt.AlignmentFlag.AlignCenter, self.ev_name)
+        p.drawText(QRectF(0, H * 0.085, W, 70), Qt.AlignmentFlag.AlignCenter,      # un nombre muy largo no se sale
+                   p.fontMetrics().elidedText(self.ev_name, Qt.TextElideMode.ElideRight, int(W * 0.86)))
         p.setPen(QColor(T.MUTED))
         p.setFont(self._f(16))
         p.drawText(QRectF(0, H * 0.085 + 62, W, 26), Qt.AlignmentFlag.AlignCenter,
@@ -241,7 +240,7 @@ class RunScreen(QWidget):
         self._steps(p, W, H, t, now)
         self._detail(p, W, H, now)
 
-        if self.locked and not self.fin:                   # la salida de emergencia, siempre legible
+        if self.esc and not self.fin:                      # cómo cancelar, siempre legible
             self._esc_hint(p, W, H)
         if self.fin:
             self._final(p, cx, cy, R, now)
@@ -285,26 +284,6 @@ class RunScreen(QWidget):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(g)
             p.drawEllipse(QPointF(x, y), r, r)
-
-    def _lock_badge(self, p: QPainter, W, t):
-        txt = "Ratón y teclado bloqueados mientras trabaja"
-        f = self._f(13, QFont.Weight.DemiBold)
-        w = QFontMetrics(f).horizontalAdvance(txt) + 54
-        r = QRectF(W - w - 32, 32, w, 36)
-        p.setPen(QPen(_col(T.ACCENT, 0.45), 1))
-        p.setBrush(_col(T.ACCENT, 0.07))
-        p.drawRoundedRect(r, 18, 18)
-        # candado
-        x, y = r.left() + 18, r.center().y()
-        p.setPen(QPen(QColor(T.ACCENT), 1.8))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawArc(QRectF(x - 5, y - 10, 10, 11), 0, 180 * 16)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(T.ACCENT))
-        p.drawRoundedRect(QRectF(x - 7, y - 4, 14, 11), 2.5, 2.5)
-        p.setPen(QColor(T.TEXT))
-        p.setFont(f)
-        p.drawText(QRectF(r.left() + 36, r.top(), w - 40, r.height()), Qt.AlignmentFlag.AlignVCenter, txt)
 
     def _esc_hint(self, p: QPainter, W, H):
         """«Para cancelar, pulsa [esc] [esc] [esc]» con teclas dibujadas: se entiende de un vistazo."""
@@ -373,16 +352,18 @@ class RunScreen(QWidget):
         if m:
             if lines:
                 lines.append(("", T.FAINT, self._f(6)))
-            gpu = m.get("gpu")
-            lines.append((f"CPU {m.get('cpu', 0):.0f} %    GPU {gpu if gpu is not None else '—'} %    "
-                          f"Memoria {dec(m.get('mem_used', 0))} de {m.get('mem_total', 0):.0f} GB",
+            gpu = m.get("gpu")                                   # None: no se puede leer (Windows): no «GPU — %»
+            lines.append((f"CPU {m.get('cpu', 0):.0f} %    " + (f"GPU {gpu} %    " if gpu is not None else "")
+                          + f"Memoria {dec(m.get('mem_used', 0))} de {m.get('mem_total', 0):.0f} GB",
                           T.TEXT, self._f(13, QFont.Weight.DemiBold)))
             lines.append((f"Red  ↑ {dec(m.get('up', 0))} MB/s    ↓ {dec(m.get('down', 0))} MB/s",
                           T.MUTED, self._f(13)))
             ncpu = max(1, m.get("ncpu", 1))
             progs = [f"{k} {v / ncpu:.0f} %" for k, v in m.get("procs", [])[:3] if v / ncpu >= 1]
             if progs:
-                lines.append(("Usan el Mac:  " + "  ·  ".join(progs), T.MUTED, self._f(13)))
+                import sys
+                lines.append((("Usan el Mac:  " if sys.platform == "darwin" else "Usan el equipo:  ")
+                              + "  ·  ".join(progs), T.MUTED, self._f(13)))
         heights = [max(8.0, QFontMetrics(fn).height() + 4) for _, _, fn in lines]
         h = 44 + sum(heights) + 14
         r = QRectF(x0, cy - h / 2, w, h)
@@ -688,7 +669,10 @@ class RunScreen(QWidget):
         H = self.height()
         p.setPen(_col(T.TEXT, f))
         p.setFont(self._f(30, QFont.Weight.Bold))
-        p.drawText(QRectF(0, H * 0.875 - 8, self.width(), 40), Qt.AlignmentFlag.AlignCenter, title)
+        wmax = int(self.width() * 0.9)                         # en una pantalla estrecha el resumen no se corta a lo bruto
+        p.drawText(QRectF(0, H * 0.875 - 8, self.width(), 40), Qt.AlignmentFlag.AlignCenter,
+                   p.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight, wmax))
         p.setPen(_col(T.MUTED, f))
         p.setFont(self._f(15))
-        p.drawText(QRectF(0, H * 0.875 + 34, self.width(), 24), Qt.AlignmentFlag.AlignCenter, text)
+        p.drawText(QRectF(0, H * 0.875 + 34, self.width(), 24), Qt.AlignmentFlag.AlignCenter,
+                   p.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, wmax))

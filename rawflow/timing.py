@@ -86,6 +86,12 @@ def model(phase: str, hist=None) -> Tuple[float, float, int]:
     return fixed, spp0, len(pts)
 
 
+def _sel_time(n: int) -> float:
+    """Selección IA: Mac ≈0,07 s por foto (vista previa del RAW con Vision); Windows ≈0,17 s (OpenCV), medido con NEF."""
+    import sys
+    return 2.0 + 0.08 * n if sys.platform == "darwin" else 4.0 + 0.2 * n
+
+
 def _tanda1(n: int) -> int:
     """Fotos por tanda si un evento de n fotos sube a Imagen por tandas en este Mac (ver core.tanda_size)."""
     try:
@@ -99,7 +105,8 @@ def _tanda1(n: int) -> int:
 
 
 def upload_bps(hist=None) -> float:
-    pts = [(b, s) for _, b, s in (hist if hist is not None else _history()).get("subida", []) if s > 2][-10:]
+    # (b > 0: una subida anotada con 0 bytes daba velocidad 0 y la estimación fallaba al dividir entre ella)
+    pts = [(b, s) for _, b, s in (hist if hist is not None else _history()).get("subida", []) if s > 2 and b > 0][-10:]
     return sum(b for b, _ in pts) / sum(s for _, s in pts) if pts else UPLOAD_BPS
 
 
@@ -132,7 +139,7 @@ class Estimator:
         dng_bytes = nbytes * DNG_PER_RAW
         small = sum(b for _, b, _ in h.get("imagen", [])[-5:]) / max(1, len(h.get("imagen", [])[-5:]))
         upload = max(0.0, dng_bytes - small) / upload_bps(h)
-        sel = 2.0 + 0.08 * n                             # Selección IA: ≈0,07 s por foto (vista previa del RAW)
+        sel = _sel_time(n)                               # Selección IA: por foto (vista previa del RAW)
         est = [max(2.0, nbytes / _move_bps(h)), sel, p("dxo"), p("imagen") + upload + p("bridge"), p("ret"), p("pres")]
         k = _tanda1(n)
         if k:       # por tandas: la subida a Imagen va mientras DxO trabaja; después solo la última tanda + Bridge
@@ -169,7 +176,7 @@ class Estimator:
             has_pres = pres.is_dir() and any(pres.glob("*.mp4"))
             if done_dng:                                       # sin DNG aún: lo de estimate() (tandas incluidas)
                 est[2] = p("dxo", pend_dng)
-                est[1] = 2.0 + 0.08 * pend_dng                # la Selección IA solo mira las que aún no tienen DNG
+                est[1] = _sel_time(pend_dng)                  # la Selección IA solo mira las que aún no tienen DNG
             if n_img >= n:
                 est[3] = 0.0
             elif (dngs / ".rawflow_imagen_ok").exists():

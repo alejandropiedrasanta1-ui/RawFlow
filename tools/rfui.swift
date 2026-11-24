@@ -7,7 +7,8 @@
 //   rfui type "texto"             -> escribir texto (unicode)
 //   rfui key CODE [cmd,shift,alt,ctrl]
 //   rfui block [segundos]         -> bloquea ratón/trackpad/teclado físicos y deja el cursor quieto
-//                                    (0 o nada = sin límite; Esc ×3 sale; stdin cerrado suelta)
+//                                    (0 o nada = sin límite; Esc ×3 sale; stdin cerrado suelta) — RawFlow ya no lo usa
+//   rfui escuchar                 -> NO bloquea nada: solo avisa («CANCEL») si pulsas Esc ×3; stdin cerrado termina
 //   rfui check                    -> "ax=1 screen=1" permisos
 //   rfui cull < rutas             -> Selección IA: una línea JSON por foto (caras, ojos, inclinación, nitidez, luz, hora, EV,
 //                                    escena, estética, parecido con las 4 anteriores), con la IA del Mac, sin internet
@@ -77,6 +78,9 @@ func captureFull() -> CGImage? {
 //   · Esc ×3 (tres pulsaciones en 2,5 s; mantener la tecla no cuenta) → «CANCEL» y se suelta al instante.
 //   · stdin cerrado (RawFlow lo soltó o se cerró) o RawFlow muerto → se suelta.
 //   · Con la pantalla bloqueada (al despertar del reposo) deja pasar todo, para poder escribir la contraseña.
+// «rfui escuchar» (lo que usa RawFlow desde el 23-nov-2026): el mismo filtro, pero deja pasar TODO (ratón, trackpad y teclado
+// siguen libres) y solo mira si pulsas Esc ×3 para cancelar. Imprime «LISTENING …» en vez de «BLOCKING …».
+var passThrough = false
 var blockTap: CFMachPort? = nil
 var escTimes: [Double] = []
 var blockLog: FileHandle? = nil
@@ -112,6 +116,7 @@ let blockCallback: CGEventTapCallBack = { _, type, event, _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { exit(0) }   // la 3.ª Esc no llega a ninguna app
         }
     }
+    if passThrough { return Unmanaged.passUnretained(event) }                // «rfui escuchar»: nada se bloquea
     if moveTypes.contains(type) { CGWarpMouseCursorPosition(holdPoint) }     // el cursor no se mueve
     return nil
 }
@@ -133,7 +138,9 @@ func runBlock(maxSeconds: Double) {
     for loc in [CGEventTapLocation.cghidEventTap, .cgSessionEventTap] {
         blockTap = CGEvent.tapCreate(tap: loc, place: .headInsertEventTap, options: .defaultTap,
                                      eventsOfInterest: mask, callback: blockCallback, userInfo: nil)
-        if blockTap != nil { print("BLOCKING \(loc == .cghidEventTap ? "hid" : "session")"); break }
+        if blockTap != nil {
+            print("\(passThrough ? "LISTENING" : "BLOCKING") \(loc == .cghidEventTap ? "hid" : "session")"); break
+        }
     }
     fflush(stdout)
     guard let tap = blockTap else { print("ERROR no event tap"); exit(3) }
@@ -450,6 +457,9 @@ case "shot":
     CGImageDestinationAddImage(dst, img, nil); CGImageDestinationFinalize(dst)
 case "block":
     runBlock(maxSeconds: args.count > 1 ? num(1) : 0)          // 0 = sin límite (hasta que RawFlow lo suelte)
+case "escuchar":                                               // solo Esc ×3 para cancelar: no bloquea nada
+    passThrough = true
+    runBlock(maxSeconds: 0)
 case "click":
     let p = CGPoint(x: num(1), y: num(2)); let n = args.count > 3 ? Int64(args[3])! : 1
     mouse(.mouseMoved, p); usleep(120000)

@@ -13,4 +13,7 @@
 *.ttf  binary
 *.ico  binary
 *.cer  binary
+*.onnx   binary
+*.tflite binary
+*.task   binary
 *.jsonl text eol=lf

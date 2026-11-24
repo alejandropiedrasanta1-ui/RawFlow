@@ -17,7 +17,7 @@ PROGRAMS = (
     ("Imagen AI", ("imagenai", "imagen ai")),
     ("Adobe Bridge", ("adobe bridge", "bridge.app")),
     ("Retouch4me", ("retouch4me",)),
-    ("CineSlide", ("application support/cineslide",)),
+    ("CineSlide", ("application support/cineslide", "\\cineslide\\")),      # Mac · Windows (Program Files\CineSlide)
     ("RawFlow", ("rawflow",)),
     ("Spotlight", ("mdworker", "mds_stores")),
 )

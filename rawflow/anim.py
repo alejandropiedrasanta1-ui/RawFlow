@@ -12,10 +12,19 @@ from . import theme as T
 _keep = []          # mantener vivas las animaciones en curso
 
 
+def _drop(a):
+    _keep[:] = [x for x in _keep if x is not a]
+
+
 def _hold(a):
-    _keep.append(a)
-    a.finished.connect(lambda: _keep.remove(a) if a in _keep else None)
-    a.start()
+    """Arranca la animación y la mantiene viva hasta que acabe (o hasta que su widget desaparezca)."""
+    try:
+        _keep.append(a)
+        a.finished.connect(lambda: _drop(a))
+        a.destroyed.connect(lambda *_: _drop(a))      # el widget se quitó a media animación: no se queda guardada
+        a.start()
+    except RuntimeError:          # el widget ya no existe (se quitó antes de empezar): no hay nada que animar
+        _drop(a)
 
 
 def fade_in_window(w: QWidget, ms: int = 380):
@@ -30,26 +39,36 @@ def fade_in_window(w: QWidget, ms: int = 380):
 
 def slide_in(w: QWidget, ms: int = 420):
     """La tarjeta crece desde 0 de alto y aparece (sin descolocar el resto de la columna)."""
+    if T.reduce_motion():             # «Reducir movimiento»: aparece ya en su sitio
+        return
+    lo, hi = w.minimumHeight(), w.maximumHeight()
+    fixed = lo == hi                  # alto fijo (las tarjetas de memoria): con solo bajar el máximo no encogía,
+    #                                   el mínimo mandaba y la tarjeta salía de golpe; y al acabar perdía su alto fijo
+    target = lo if fixed else max(w.sizeHint().height(), 60)
     eff = QGraphicsOpacityEffect(w)
     eff.setOpacity(0.0)
     w.setGraphicsEffect(eff)
-    target = max(w.sizeHint().height(), 60)
-    w.setMaximumHeight(0)
+    w.setFixedHeight(0) if fixed else w.setMaximumHeight(0)
     a = QVariantAnimation(w, startValue=0.0, endValue=1.0, duration=ms,
                           easingCurve=QEasingCurve.Type.OutCubic)
 
     def step(v):
         v = float(v)
         try:
-            w.setMaximumHeight(int(target * v))
+            h = int(target * v)
+            w.setFixedHeight(h) if fixed else w.setMaximumHeight(h)
             eff.setOpacity(v)
         except RuntimeError:          # la tarjeta ya no existe
             a.stop()
 
     def done():
         try:
-            w.setMaximumHeight(16777215)
-            w.setGraphicsEffect(None)
+            if fixed:
+                w.setFixedHeight(target)
+            else:
+                w.setMaximumHeight(hi)
+            if w.graphicsEffect() is eff:
+                w.setGraphicsEffect(None)
         except RuntimeError:
             pass
 
@@ -97,8 +116,10 @@ def fade_in(w: QWidget, ms: int = 220, start: float = 0.0, delay: int = 0):
     if old is not None:
         try:
             old.stop()
+            old.deleteLater()
         except RuntimeError:
             pass
+        _drop(old)                    # (parada a mano no avisa de que «terminó»: se quedaba guardada para siempre)
     eff = QGraphicsOpacityEffect(w)
     eff.setOpacity(start)
     w.setGraphicsEffect(eff)
