@@ -173,13 +173,16 @@ def label(text: str, name: str = "") -> QLabel:
 
 
 class Stat(QWidget):
-    def __init__(self, caption: str):
+    def __init__(self, caption: str, reserve: str = ""):
         super().__init__()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(2)
         self.value = label("—", "bigNumber")
         self.value.setFont(font(32, QFont.Weight.Bold, tnum=True))       # al contar, las cifras no bailan
+        if reserve:   # (4.26) al contar, el ancho cambiaba en cada cifra: las columnas bailaban y «102.2 MB» salía cortado
+            from PySide6.QtGui import QFontMetrics
+            self.value.setMinimumWidth(QFontMetrics(self.value.font()).horizontalAdvance(reserve) + 4)
         lay.addWidget(self.value)
         lay.addWidget(label(caption, "bigLabel"))
         self._n, self._fmt = 0.0, None
@@ -837,17 +840,20 @@ class MainWindow(QMainWindow):
         sl.addWidget(label("PARA PROCESAR", "sectionTitle"))
         grid = QGridLayout()
         grid.setHorizontalSpacing(36)
-        self.st_count = Stat("fotos RAW")
-        self.st_size = Stat("en total")
-        self.st_days = Stat("fecha")
+        self.st_count = Stat("fotos RAW", reserve="8,888")
+        self.st_size = Stat("en total", reserve="888.8 MB")
+        self.st_days = Stat("fecha", reserve="88 sep")
         for i, w in enumerate((self.st_count, self.st_size, self.st_days)):
             grid.addWidget(w, 0, i)
         grid.setColumnStretch(3, 1)
         sl.addLayout(grid)
-        self.fmt_row = QHBoxLayout()
+        fmt_box = QWidget()                        # (4.26) guarda su alto sin chips: los números no saltan al quitarlas
+        fmt_box.setFixedHeight(24)
+        self.fmt_row = QHBoxLayout(fmt_box)
+        self.fmt_row.setContentsMargins(0, 0, 0, 0)
         self.fmt_row.setSpacing(6)
         self.fmt_row.addStretch(1)
-        sl.addLayout(self.fmt_row)
+        sl.addWidget(fmt_box)
         right.addWidget(sm)
 
         # --- acción

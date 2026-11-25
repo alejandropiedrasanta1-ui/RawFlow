@@ -169,20 +169,24 @@ class Glow:
         self.eff.setBlurRadius(0)
         button.setGraphicsEffect(self.eff)
         self.t = 0.0
+        self.level = 0.0                                 # 0 = apagado, 1 = brillo entero (sube y baja suave)
         self.timer = QTimer(button, interval=33)        # 30 fps: respira suave (≈2,5 ms por fotograma)
         self.timer.timeout.connect(self._tick)
         self.timer.start()
 
     def _tick(self):
-        # solo con RawFlow delante: al fondo (o tapada) no se anima, así no gasta CPU ni calienta el Mac
+        # solo con RawFlow delante: al fondo (o tapada) no se anima, así no gasta CPU ni calienta el Mac.
+        # (4.26) al perder o recuperar el foco el brillo se apagaba/encendía de golpe: ahora se desvanece (≈0,3 s)
         w = self.b.window()
-        if not self.b.isVisible() or not self.b.isEnabled() or not (w and w.isActiveWindow()):
+        on = self.b.isVisible() and self.b.isEnabled() and bool(w and w.isActiveWindow())
+        if not on and self.level <= 0.0:
             if self.eff.blurRadius():
                 self.eff.setBlurRadius(0)
             return
+        self.level = min(1.0, self.level + 0.12) if on else max(0.0, self.level - 0.12)
         self.t += 0.033
         k = 0.5 + 0.5 * math.sin(self.t * 2.4)
         c = QColor(T.ACCENT)
-        c.setAlphaF(0.35 + 0.35 * k)
+        c.setAlphaF((0.35 + 0.35 * k) * self.level)
         self.eff.setColor(c)
-        self.eff.setBlurRadius(14 + 22 * k)
+        self.eff.setBlurRadius((14 + 22 * k) * self.level)

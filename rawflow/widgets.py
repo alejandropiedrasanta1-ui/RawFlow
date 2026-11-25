@@ -6,7 +6,7 @@ from typing import List
 from PySide6.QtCore import (QEasingCurve, QPointF, QRectF, Qt, QTimer,
                             QVariantAnimation, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics, QIcon, QLinearGradient,
-                           QPainter, QPainterPath, QPen, QPixmap)
+                           QPainter, QPainterPath, QPen, QPixmap, QRadialGradient)
 from PySide6.QtWidgets import QFrame, QLabel, QPushButton, QSizePolicy, QWidget
 
 from . import theme as T
@@ -119,8 +119,16 @@ class ElidedLabel(QLabel):
         self._full = text
         self._update()
         if changed and self.fade_changes and text and self.isVisible() and not T.reduce_motion():
-            from . import anim
-            anim.fade_in(self, 200, start=0.25)
+            # (4.26) con cambios seguidos («Analizando… 3 fotos», «… 4 fotos») cada uno volvía a empezar el fundido
+            # desde 25 %: el texto parpadeaba. Ahora solo entra con fundido el primero de una racha; los demás se
+            # cambian sin más (si el fundido aún va, sigue hasta el final).
+            import time as _t
+            now = _t.monotonic()
+            quiet = now - getattr(self, "_last_change", 0.0) > 0.7
+            self._last_change = now
+            if quiet:
+                from . import anim
+                anim.fade_in(self, 200, start=0.25)
 
     def setFont(self, f) -> None:  # noqa: N802
         super().setFont(f)
@@ -403,16 +411,24 @@ class RippleButton(QPushButton):
         super().paintEvent(e)
         if self._a.state() != QVariantAnimation.State.Running:
             return
+        # (4.26) la onda era un círculo de borde duro tan grande que se veía como una franja barriendo el botón y
+        # tapaba el texto. Ahora es una onda suave (borde difuminado) que llega a la esquina más lejana y se apaga.
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         clip = QPainterPath()
         clip.addRoundedRect(QRectF(self.rect()), 14, 14)
         p.setClipPath(clip)
-        c = QColor("#FFFFFF")
-        c.setAlphaF(0.34 * (1.0 - self._k))
+        far = max(((self._pos.x() - x) ** 2 + (self._pos.y() - y) ** 2) ** 0.5
+                  for x in (0, self.width()) for y in (0, self.height()))
+        r = 12 + self._k * far
+        g = QRadialGradient(self._pos, r)
+        a = 0.22 * (1.0 - self._k) ** 1.4
+        for stop, f in ((0.0, 0.55), (0.75, 1.0), (1.0, 0.0)):
+            c = QColor("#FFFFFF")
+            c.setAlphaF(a * f)
+            g.setColorAt(stop, c)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(c)
-        r = 24 + self._k * max(self.width(), self.height()) * 0.6
+        p.setBrush(g)
         p.drawEllipse(self._pos, r, r)
 
 

@@ -292,6 +292,15 @@ encuentra por su sitio (entre «Perfiles de IA» y «Social Spotlight»).
 - El nombre del proyecto se escribe clicando dentro de su casilla y se comprueba (una vez se creó como «2 DNGs»).
 - Cada vez que algo no aparece en pantalla se guarda una captura en «diagnostico» y el registro dice cuál es.
 
+## Botones y textos sin saltos (4.27)
+
+Revisado con fotogramas a escala 150 %: la línea de estado parpadeaba con cada cambio seguido («Analizando… 3
+fotos», «… 4 fotos»: cada uno volvía a empezar el fundido) → solo el primero de una racha entra con fundido. Los
+números de «Para procesar» bailaban de lado al contar, «102.2 MB» salía cortado y todo saltaba hacia abajo al
+quitar la etiqueta de formato → cada número tiene su ancho reservado y la fila de etiquetas guarda su alto. La onda
+de Empezar era un círculo de borde duro que barría el botón y tapaba el texto → onda suave que se apaga. El brillo de
+Empezar se apagaba de golpe al cambiar de ventana → se desvanece.
+
 ## Memorias más rápidas y aviso de retirarla (4.26, Windows)
 
 - **Detectar la memoria**: Windows avisa al ponerla (WM_DEVICECHANGE) y RawFlow mira al instante y cada 0,25 s
