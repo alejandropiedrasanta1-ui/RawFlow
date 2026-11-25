@@ -15,6 +15,7 @@ no carga, se lanza EngineUnavailable y el paso usa Arams con la pantalla, como a
 """
 from __future__ import annotations
 
+import collections
 import json
 import os
 import queue
@@ -249,22 +250,155 @@ def retouch(src: Path, dest: Path, log, should_stop=lambda: False, progress=lamb
     chain = plan(preset)
     if already:
         log(f"Retouch4me: {already} ya estaban hechas; sigo con las {len(todo)} que faltan.")
-    job_file = WORK / "retouch4me-trabajo.json"
     stop_file = WORK / "retouch4me-parar"
     WORK.mkdir(parents=True, exist_ok=True)
     stop_file.unlink(missing_ok=True)
     items = [{"in": str(p), "tmp": str(dest / (TMP_PREFIX + p.name)), "out": str(dest / p.name)} for p in todo]
-    job_file.write_text(json.dumps({"logDir": str(WORK / "retouch4me-registro"), "stopFile": str(stop_file),
-                                    "plugins": chain, "quality": 100, "items": items}, ensure_ascii=False),
-                        encoding="utf-8")
-    win = sys.platform == "win32"
-    env = dict(os.environ, ELECTRON_RUN_AS_NODE="1")
-    for k in ("NODE_OPTIONS", "ELECTRON_NO_ASAR", "RF_FD", "RF_FILE"):
-        env.pop(k, None)
-    noise = open(WORK / "retouch4me-salida.log", "w", encoding="utf-8")   # lo que imprime el motor suelto
-    lines: "queue.Queue[Optional[str]]" = queue.Queue()
-    if win:                                           # Windows no hereda descriptores sueltos: los avisos van a un
-        chan = WORK / "retouch4me-avisos.txt"         # archivo que el trabajador escribe línea a línea y aquí se sigue
+    k = processes(len(items))
+    aviso = gpu_warning() if os.environ.get("RAWFLOW_SIN_APPS") != "1" else ""
+    if aviso:
+        log("⚠ " + aviso)
+        live.set("ret", aviso)
+    parts = [list(range(i, len(items), k)) for i in range(k)]   # foto i → proceso i % k (cada uno, su parte)
+    env0 = dict(os.environ, ELECTRON_RUN_AS_NODE="1")
+    for v in ("NODE_OPTIONS", "ELECTRON_NO_ASAR", "RF_FD", "RF_FILE"):
+        env0.pop(v, None)
+    lines: "queue.Queue[Tuple[int, Optional[str]]]" = queue.Queue()
+    procs: List[subprocess.Popen] = []
+    early: "collections.deque" = collections.deque()   # avisos leídos mientras arrancaban los motores
+    for old in WORK.glob("retouch4me-trabajo-*.json"):      # los de otra vez con más procesos: fuera
+        old.unlink(missing_ok=True)
+    for w, idx in enumerate(parts):
+        job_file = WORK / ("retouch4me-trabajo.json" if w == 0 else f"retouch4me-trabajo-{w + 1}.json")
+        job_file.write_text(json.dumps({"logDir": str(WORK / "retouch4me-registro"), "stopFile": str(stop_file),
+                                        "plugins": chain, "quality": 100, "items": [items[i] for i in idx]},
+                                       ensure_ascii=False), encoding="utf-8")
+        procs.append(_start_worker(w, job_file, env0, lines))
+        if w < k - 1:
+            # Escalonados: el siguiente motor arranca cuando este ya cargó sus plugins. Arrancando los 3 a la vez, a
+            # veces uno no cargaba («código 3», 24-nov-2026) y se repetía todo el paso. Cuesta ~1 s por motor.
+            t_w = time.monotonic()
+            while time.monotonic() - t_w < 90:
+                try:
+                    got = lines.get(timeout=1.0)
+                except queue.Empty:
+                    if should_stop():
+                        break
+                    continue
+                early.append(got)
+                if got[0] == w and (got[1] is None or got[1].startswith(("READY", "FATAL", "LOADERR"))):
+                    break
+
+    total = len(todo)
+    ok_n, errors, loaderr, durs = 0, [], [], []
+    t_start = last_seen = time.monotonic()
+    cur = [-1] * k                                    # foto en curso de cada proceso (índice en `items`)
+    photo_t0 = [t_start] * k
+    ready_n = ended = finished_n = 0
+    rcs: List[Optional[int]] = [None] * k
+
+    def pace() -> float:
+        """Segundos por foto de CADA proceso: media de las ya hechas en este evento (sin la primera, que lleva el
+        arranque del motor), o lo típico con CINEMA mientras no hay datos. Con k procesos salen k a la vez."""
+        d = durs[1:] or durs
+        return sum(d) / len(d) if d else 55.0
+
+    def stop_all():
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+
+    try:
+        while ended < k:
+            if should_stop():
+                stop_file.touch()                          # cada motor corta la foto en curso y sale
+                for p in procs:
+                    try:
+                        p.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        p.kill()
+                raise RuntimeError("Cancelado.")
+            try:
+                w, line = early.popleft() if early else lines.get(timeout=1.0)   # primero lo leído al arrancar
+            except queue.Empty:
+                w, line = -1, ""
+            now = time.monotonic()
+            if line is None:                                # ese proceso terminó
+                ended += 1
+                continue
+            if not line:
+                # vigilante: sin señal de NINGÚN motor mucho más de lo normal → cortar y reintentar las que faltan
+                if now - last_seen > (max(300.0, pace() * 6) if ok_n else 600.0):
+                    stop_all()
+                    raise RuntimeError(f"El motor de Retouch4me dejó de avanzar ({ok_n} de {total}): "
+                                       "reintento con las que faltan.")
+                busy = [min(0.95, (now - photo_t0[j]) / pace()) for j in range(k) if cur[j] >= 0]
+                if busy:                                    # barra suave dentro de cada foto (por tiempo)
+                    progress((ok_n + sum(busy)) / total)
+                continue
+            last_seen = now
+            kind, _, rest = line.partition(" ")
+            if kind == "READY":
+                ready_n += 1
+                if ready_n == 1:
+                    log(f"Retouch4me: motor listo ({' → '.join(p['id'] for p in chain)}) · {total} fotos"
+                        + (f" · {k} a la vez" if k > 1 else ""))
+            elif kind == "START":
+                j = int(rest)
+                cur[w], photo_t0[w] = (parts[w][j] if 0 <= j < len(parts[w]) else -1), now
+            elif kind == "OK":
+                ok_n += 1
+                durs.append(now - photo_t0[w])
+                cur[w] = -1
+                all_n = max(expected_total or 0, already + total)
+                left = all_n - already - ok_n
+                progress(ok_n / total)
+                # lo que falta: con el ritmo de las ÚLTIMAS fotos (si el equipo se calienta o vienen fotos de grupo,
+                # se nota enseguida) mezclado con la media del evento; con k procesos, k fotos a la vez
+                recent = durs[-25:] if len(durs) > 3 else durs
+                eta_pace = (0.6 * (sum(recent) / len(recent)) + 0.4 * pace()) / k
+                log(f"Retouch4me: {already + ok_n} de {all_n} retocadas  ·  {pace() / k:.0f} s por foto"
+                    + (f"  ·  quedan {_mmss(eta_pace * left)}" if left > 0 else ""))
+                live.set("ret", f"{already + ok_n:,} de {all_n:,} fotos  ·  {pace() / k:.0f} s por foto"
+                                + (f" ({k} a la vez)" if k > 1 else "") + "  ·  CINEMA")
+                live.set_eta(STEP_RET, eta_pace * left)
+            elif kind == "ERR":
+                p_ = rest.split(" ", 2)
+                j = int(p_[0]) if p_ and p_[0].lstrip("-").isdigit() else -1
+                i = parts[w][j] if 0 <= j < len(parts[w]) else -1
+                name = Path(items[i]["in"]).name if 0 <= i < len(items) else "?"
+                why = p_[2] if len(p_) > 2 else rest
+                errors.append(f"{name}: {why}")
+                log(f"   Retouch4me no pudo con {name} ({why})")
+            elif kind in ("LOADERR", "FATAL"):
+                loaderr.append(rest)
+            elif kind in ("END", "STOPPED"):
+                finished_n += kind == "END"
+            # PROG: solo señal de vida (el motor reinicia su cuenta en cada plugin)
+        for j, p in enumerate(procs):
+            rcs[j] = p.wait(timeout=30)
+    finally:
+        stop_all()
+        for p in dest.glob(TMP_PREFIX + "*"):
+            p.unlink(missing_ok=True)
+    if loaderr or ready_n < k:
+        raise EngineUnavailable("el motor no cargó los plugins"
+                                + (f" ({loaderr[0]})" if loaderr else f" (código {next((c for c in rcs if c), None)})"))
+    if errors or finished_n < k:
+        msg = f"Retouch4me: {len(errors) or total - ok_n} fotos sin retocar"
+        raise RuntimeError(msg + (f" ({errors[0]})" if errors else "") + ": reintento con las que faltan.")
+    log(f"✓  Retouch4me: {already + ok_n} fotos retocadas con {preset} en «{dest.name}» "
+        f"(motor directo{f', {k} a la vez' if k > 1 else ''}, {_mmss(time.monotonic() - t_start)}).")
+    return already + ok_n
+
+
+def _start_worker(w: int, job_file: Path, env0: dict, lines: "queue.Queue") -> subprocess.Popen:
+    """Arranca un proceso del motor con su trabajo; sus avisos llegan a `lines` como (w, línea) y (w, None) al salir."""
+    env = dict(env0)
+    noise = open(WORK / ("retouch4me-salida.log" if w == 0 else f"retouch4me-salida-{w + 1}.log"), "w",
+                 encoding="utf-8")                    # lo que imprime el motor suelto
+    if sys.platform == "win32":                       # Windows no hereda descriptores sueltos: los avisos van a un
+        chan = WORK / ("retouch4me-avisos.txt" if w == 0 else f"retouch4me-avisos-{w + 1}.txt")   # archivo que se sigue
         chan.write_text("", encoding="utf-8")
         env["RF_FILE"] = str(chan)
         try:
@@ -283,16 +417,16 @@ def retouch(src: Path, dest: Path, log, should_stop=lambda: False, progress=lamb
                         buf += chunk
                         *full, buf = buf.split("\n")
                         for line in full:
-                            lines.put(line.rstrip("\r"))
+                            lines.put((w, line.rstrip("\r")))
                         continue
                     if proc.poll() is not None:           # el motor salió: lo último que dejara escrito y fin
                         rest = f.read()
                         for line in (buf + rest).split("\n"):
                             if line.strip():
-                                lines.put(line.rstrip("\r"))
+                                lines.put((w, line.rstrip("\r")))
                         break
                     time.sleep(0.2)
-            lines.put(None)
+            lines.put((w, None))
     else:
         rfd, wfd = os.pipe()                          # canal de avisos del trabajador (ver r4m_worker.js)
         env["RF_FD"] = str(wfd)
@@ -307,93 +441,80 @@ def retouch(src: Path, dest: Path, log, should_stop=lambda: False, progress=lamb
         def reader():
             with os.fdopen(rfd, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
-                    lines.put(line.rstrip("\n"))
-            lines.put(None)
+                    lines.put((w, line.rstrip("\n")))
+            lines.put((w, None))
     threading.Thread(target=reader, daemon=True).start()
+    return proc
 
-    total = len(todo)
-    ok_n, errors, loaderr, durs = 0, [], [], []
-    t_start = last_seen = photo_t0 = time.monotonic()
-    cur, rc = -1, None
-    ready = finished = False
 
-    def pace() -> float:
-        """Segundos por foto: media de las ya hechas en este evento (sin la primera, que lleva el arranque del
-        motor), o lo típico con CINEMA en este Mac mientras no hay datos."""
-        d = durs[1:] or durs
-        return sum(d) / len(d) if d else 55.0
-
+def processes(n_fotos: int) -> int:
+    """Cuántos motores a la vez. Medido (24-nov-2026, RTX 5070 Ti 16 GB): 1 → 23 s por foto, 3 → 16 s, fotos
+    idénticas byte a byte. Cada motor ocupa ≈3,5 GB de la tarjeta: se usan los que quepan en la memoria LIBRE de la
+    tarjeta (con margen), como mucho 3. Mac: 1 (memoria compartida con todo el sistema; sin medir).
+    RAWFLOW_R4M_PROCESOS lo fija (1 = como antes)."""
     try:
-        while True:
-            if should_stop():
-                stop_file.touch()                          # el motor corta la foto en curso y sale
-                try:
-                    proc.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                raise RuntimeError("Cancelado.")
-            try:
-                line = lines.get(timeout=1.0)
-            except queue.Empty:
-                line = ""
-            now = time.monotonic()
-            if line is None:                                # el proceso terminó
-                break
-            if not line:
-                # vigilante: sin señal del motor mucho más de lo normal → cortar y reintentar las que faltan
-                if now - last_seen > (max(300.0, pace() * 6) if ok_n else 600.0):
-                    proc.kill()
-                    raise RuntimeError(f"El motor de Retouch4me dejó de avanzar ({ok_n} de {total}): "
-                                       "reintento con las que faltan.")
-                if cur >= 0:                                # barra suave dentro de cada foto (por tiempo)
-                    progress((ok_n + min(0.95, (now - photo_t0) / pace())) / total)
-                continue
-            last_seen = now
-            kind, _, rest = line.partition(" ")
-            if kind == "READY":
-                ready = True
-                log(f"Retouch4me: motor listo ({' → '.join(p['id'] for p in chain)}) · {total} fotos")
-            elif kind == "START":
-                cur, photo_t0 = int(rest), now
-            elif kind == "OK":
-                ok_n += 1
-                durs.append(now - photo_t0)
-                all_n = max(expected_total or 0, already + total)
-                left = all_n - already - ok_n
-                progress(ok_n / total)
-                # lo que falta: con el ritmo de las ÚLTIMAS fotos (si el Mac se calienta o vienen fotos de grupo,
-                # se nota enseguida) mezclado con la media del evento
-                recent = durs[-25:] if len(durs) > 3 else durs
-                eta_pace = 0.6 * (sum(recent) / len(recent)) + 0.4 * pace()
-                log(f"Retouch4me: {already + ok_n} de {all_n} retocadas  ·  {pace():.0f} s por foto"
-                    + (f"  ·  quedan {_mmss(eta_pace * left)}" if left > 0 else ""))
-                live.set("ret", f"{already + ok_n:,} de {all_n:,} fotos  ·  {durs[-1]:.0f} s la última  ·  "
-                                f"{pace():.0f} s de media  ·  CINEMA")
-                live.set_eta(STEP_RET, eta_pace * left)
-            elif kind == "ERR":
-                parts = rest.split(" ", 2)
-                i = int(parts[0]) if parts and parts[0].lstrip("-").isdigit() else -1
-                name = Path(items[i]["in"]).name if 0 <= i < len(items) else "?"
-                why = parts[2] if len(parts) > 2 else rest
-                errors.append(f"{name}: {why}")
-                log(f"   Retouch4me no pudo con {name} ({why})")
-            elif kind in ("LOADERR", "FATAL"):
-                loaderr.append(rest)
-            elif kind in ("END", "STOPPED"):
-                finished = kind == "END"
-            # PROG: solo señal de vida (el motor reinicia su cuenta en cada plugin)
-        rc = proc.wait(timeout=30)
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-        for p in dest.glob(TMP_PREFIX + "*"):
-            p.unlink(missing_ok=True)
-    if loaderr or not ready:
-        raise EngineUnavailable("el motor no cargó los plugins"
-                                + (f" ({loaderr[0]})" if loaderr else f" (código {rc})"))
-    if errors or not finished:
-        msg = f"Retouch4me: {len(errors) or total - ok_n} fotos sin retocar"
-        raise RuntimeError(msg + (f" ({errors[0]})" if errors else "") + ": reintento con las que faltan.")
-    log(f"✓  Retouch4me: {already + ok_n} fotos retocadas con {preset} en «{dest.name}» "
-        f"(motor directo, {_mmss(time.monotonic() - t_start)}).")
-    return already + ok_n
+        n = int(os.environ.get("RAWFLOW_R4M_PROCESOS", "0"))
+    except ValueError:
+        n = 0
+    if n <= 0:
+        n = 1
+        free = _gpu_free_mb() if sys.platform == "win32" else None
+        if free is not None:
+            n = max(1, min(MAX_PROCS, int((free - 1500) // VRAM_PER_PROC)))
+    return max(1, min(n, n_fotos))
+
+
+MAX_PROCS = 3
+VRAM_PER_PROC = 3600          # MB por motor (medido: 1 motor +3,7 GB; 3 motores ≈ +10,5 GB)
+
+
+GPU_HOGS = {"resolve.exe": "DaVinci Resolve", "adobe premiere pro.exe": "Premiere Pro", "afterfx.exe": "After Effects",
+            "photoshop.exe": "Photoshop", "lightroom.exe": "Lightroom", "obs64.exe": "OBS", "topaz video ai.exe":
+            "Topaz Video AI", "cineslide.exe": "CineSlide"}
+
+
+def gpu_hogs() -> List[Tuple[str, float]]:
+    """[(app, MB de la tarjeta que ocupa)] de las apps pesadas abiertas que usan la tarjeta gráfica (Windows)."""
+    if sys.platform != "win32":
+        return []
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-compute-apps=process_name,used_memory", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=5,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        t = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=10,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.lower()
+    except (OSError, subprocess.SubprocessError):
+        return []
+    mb: Dict[str, float] = {}
+    for line in r.stdout.splitlines():                 # (con WDDM la memoria por app suele salir «[N/A]»)
+        name, _, used = line.rpartition(",")
+        try:
+            mb[Path(name.strip()).name.lower()] = float(used)
+        except ValueError:
+            pass
+    return [(app, mb.get(exe, 0.0)) for exe, app in GPU_HOGS.items() if f'"{exe}"' in t]
+
+
+def gpu_warning() -> str:
+    """Aviso si otra app pesada ocupa la tarjeta y deja poca memoria: medido con DaVinci Resolve abierto (9-11 GB),
+    Retouch4me fue de 23 s a 98 s por foto y no cabía más de un motor."""
+    free = _gpu_free_mb()
+    if free is None or free >= MAX_PROCS * VRAM_PER_PROC + 1500:
+        return ""
+    hogs = [a for a, _ in gpu_hogs()]
+    if not hogs:
+        return ""
+    return (f"{' y '.join(hogs)} {'está' if len(hogs) == 1 else 'están'} usando la tarjeta gráfica (quedan "
+            f"{free / 1024:.1f} GB libres): Retouch4me irá bastante más lento. Ciérralo para que vaya más rápido.")
+
+
+def _gpu_free_mb() -> Optional[float]:
+    """Memoria libre de la tarjeta NVIDIA (MB), o None si no hay nvidia-smi."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=5,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        vals = [float(x) for x in r.stdout.split() if x.strip()]
+        return max(vals) if r.returncode == 0 and vals else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None

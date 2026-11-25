@@ -774,14 +774,19 @@ def _open_bridge(s: Screen, dng_dir: Path) -> None:
     exe = bridge_path()
     if not exe:
         raise UIError("No encuentro Adobe Bridge en esta PC.")
-    subprocess.Popen([str(exe), str(dng_dir)], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
-                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0), close_fds=True)
-    t0 = time.time()
+    def launch():
+        subprocess.Popen([str(exe), str(dng_dir)], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+                         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0), close_fds=True)
+    launch()
+    t0 = t_launch = time.time()
     while not s.main_window():
         if s.should_stop():
             raise UIError("Cancelado.")
         if time.time() - t0 > 120:
             raise UIError("Adobe Bridge no llegó a abrirse.")
+        if time.time() - t_launch > 25 and not _running(BRIDGE_EXE):   # el arranque se perdió: se lanza otra vez
+            launch()
+            t_launch = time.time()
         time.sleep(1)
     w = s.main_window()
     ws.activate(w["hwnd"], maximize=True, primary=True)        # en la pantalla principal su letra se lee bien
@@ -842,16 +847,19 @@ def bridge_export(s: Screen, dng_dir: Path, out_dir: Path, expected: int, progre
     s.keys("ctrl+a")                                        # todas
     time.sleep(1.0)
     for k in range(3):
-        s.tap("Archivo", exact=True, timeout=10, region=(0, 0, 0.12, 0.07), after=0.8)
-        ea = s.tap("Exportar a", exact=True, timeout=8, after=0.9)
-        cp = [b for b in s.ocr() if "personalizada" in norm(b["t"]) and abs(b["y"] - ea["y"]) < 3 * ea["h"]
-              and b["x"] > ea["x"] + ea["w"]]
-        if cp:
-            s.click_box(cp[0], after=1.5)
         try:
+            # (un Bridge recién abierto a veces no despliega el menú al primer clic: se reintenta AQUÍ, sin volver a
+            # abrir Bridge ni repetir todo el paso, que costaba ~1 min)
+            s.tap("Archivo", exact=True, timeout=10, region=(0, 0, 0.12, 0.07), after=0.8)
+            ea = s.tap("Exportar a", exact=True, timeout=8, after=0.9)
+            cp = [b for b in s.ocr() if "personalizada" in norm(b["t"]) and abs(b["y"] - ea["y"]) < 3 * ea["h"]
+                  and b["x"] > ea["x"] + ea["w"]]
+            if cp:
+                s.click_box(cp[0], after=1.5)
             s.wait("Opciones de guardado", "Formato de imagen", timeout=10)
             break
         except UIError:
+            diag(s, f"bridge-exportar-{k + 1}")
             if k == 2:
                 raise UIError("No se abrió «Exportación personalizada» en Bridge.")
             s.esc()
@@ -939,8 +947,20 @@ def close_app(exe: str, wait: float = 10) -> None:
     except Exception:  # noqa: BLE001
         return
     t0 = time.time()
-    while ws.windows(exe=exe) and time.time() - t0 < wait:
+    # Hasta que el PROCESO sale, no solo su ventana: Bridge quita la ventana en ~1 s pero tarda ~2 s en salir, y si
+    # se abría otra vez en ese hueco el arranque nuevo se perdía («no llegó a abrirse» y 120 s de espera; 24-nov-2026).
+    while (ws.windows(exe=exe) or _running(exe)) and time.time() - t0 < wait:
         time.sleep(0.5)
+
+
+def _running(exe: str) -> bool:
+    """¿Hay algún proceso con ese nombre?"""
+    try:
+        r = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {exe}", "/NH", "/FO", "CSV"], capture_output=True,
+                           text=True, timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return exe.lower() in r.stdout.lower()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def run(event_dir: Path, dng_subfolder: str, log: Log, should_stop=lambda: False, photo_type: str = "Bodas",

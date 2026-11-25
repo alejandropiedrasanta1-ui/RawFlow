@@ -578,15 +578,23 @@ print("END 0.2", file=out)
         except RuntimeError as e:
             assert "C.jpg" in str(e), e
         assert sorted(p.name for p in dest.iterdir()) == ["A.jpg", "B.jpg"]        # B hecha, sin temporales
-        job = json.loads((bindir / "retouch4me-trabajo.json").read_text())
-        assert [Path(i["in"]).name for i in job["items"]] == ["B.jpg", "C.jpg"]   # A no se repitió
+
+        def pedidas():                                  # lo que se mandó a TODOS los motores (uno o varios a la vez)
+            return sorted(Path(i["in"]).name for f in bindir.glob("retouch4me-trabajo*.json")
+                          for i in json.loads(f.read_text())["items"])
+        assert pedidas() == ["B.jpg", "C.jpg"]                                     # A no se repitió
         os.environ["FALLA"] = ""
         assert r.retouch(src, dest, lambda m: None) == 3                          # reintento: solo C
-        job = json.loads((bindir / "retouch4me-trabajo.json").read_text())
-        assert [Path(i["in"]).name for i in job["items"]] == ["C.jpg"]
+        assert pedidas() == ["C.jpg"]
         assert (dest / "B.jpg").read_bytes() == (src / "B.jpg").read_bytes()
     finally:
         r.BIN, r.plan, r.WORK = orig
+    if os.environ.get("RAWFLOW_R4M_PROCESOS") is None:  # lo mismo con 3 motores a la vez (las fotos se reparten)
+        os.environ["RAWFLOW_R4M_PROCESOS"] = "3"
+        try:
+            motor_retouch_reanuda_sin_repetir()
+        finally:
+            del os.environ["RAWFLOW_R4M_PROCESOS"]
         os.environ.pop("FALLA", None)
 
 
