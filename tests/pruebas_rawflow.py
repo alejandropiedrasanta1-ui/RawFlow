@@ -336,7 +336,7 @@ def p17():
         est = timing.Estimator().estimate(480, 480 * 30_000_000)
     finally:
         timing.HIST = orig
-    assert len(est) == 6 and all(e > 0 for e in est), est
+    assert len(est) == 7 and all(e > 0 for e in est), est
     assert 400 * 60 < est[core.STEP_RET] < 600 * 75, est     # Retouch4me: lo medido en este Mac
 
 
@@ -474,7 +474,7 @@ def p24():
     from rawflow.app import TimePanel
     QApplication.instance() or QApplication([])
     tp = TimePanel()
-    tp.begin_run([10, 40, 900, 900, 900, 60], 0)             # el modelo decía 15 min para DxO
+    tp.begin_run([10, 40, 900, 900, 900, 60, 60], 0)             # el modelo decía 15 min para DxO
     tp.step(core.STEP_DXO, "run")
     live.reset()
     live.set_eta(core.STEP_DXO, 120)                          # pero DxO va rápido: le faltan 2 min
@@ -1241,8 +1241,8 @@ def p51():
     assert pl.resume_step(ev) == (4, "fotos finales")
     for i in range(3):
         td.write(ev / core.FINAL_SUBFOLDER / f"{i + 1}.jpg", JPG_IMAGEN)
-    assert pl.resume_step(ev) == (5, "la presentación")
-    assert pl.resume_step(ev, off={5}) == (3, "")                    # CineSlide desactivado: ya está
+    assert pl.resume_step(ev) == (core.STEP_PRES, "la presentación")
+    assert pl.resume_step(ev, off={core.STEP_PRES}) == (3, "")                    # CineSlide desactivado: ya está
     td.write(ev / pl.PRES_DIR / "Presentación.mp4", b"MP4")
     assert pl.resume_step(ev) == (3, "")                             # terminado: revisar desde Imagen
     assert pl.resume_step(td.fresh("p51_vacio")) is None
@@ -1311,12 +1311,12 @@ def p53():
 
 
 @prueba("Carpetas del evento en el orden de los pasos: 1 Original · 2 DNGs · 3 Imagen AI · 4 Fotos finales · "
-        "5 Presentación de fotos; un evento de antes se reordena solo (solo cambia carpetas de sitio: ni copia ni borra)")
+        "5 Fotos finales Luminar · 6 Presentación de fotos; un evento de antes se reordena solo (solo cambia carpetas de sitio: ni copia ni borra)")
 def p54():
     from rawflow import pipeline as pl
     ev = td._evento_tandas(3)
     assert [x.name for x in pl.folders(ev)] == ["1 Original", "2 DNGs", "3 Imagen AI", "4 Fotos finales"]
-    assert pl.PRES_DIR == "5 Presentación de fotos" and pl.folders(ev, False)[2].name == "3 JPEG sin Imagen"
+    assert pl.PRES_DIR == "6 Presentación de fotos" and pl.LUM_DIR == "5 Fotos finales Luminar" and pl.folders(ev, False)[2].name == "3 JPEG sin Imagen"
     dngs = ev / core.OUTPUT_SUBFOLDER                       # evento hecho con 4.14
     viejas = {}
     for i in range(3):
@@ -1327,16 +1327,21 @@ def p54():
     inodos = {k: os.stat(q).st_ino for k, q in viejas.items()}
     assert pl.resume_step(ev) == (3, ""), pl.resume_step(ev)         # lo ve terminado… y ya está reordenado
     nombres = sorted(x.name for x in ev.iterdir() if not x.name.startswith("."))
-    assert nombres == ["1 Original", "2 DNGs", "3 Imagen AI", "4 Fotos finales", "5 Presentación de fotos"], nombres
+    assert nombres == ["1 Original", "2 DNGs", "3 Imagen AI", "4 Fotos finales", "6 Presentación de fotos"], nombres
     assert not (dngs / "Imagen AI").exists()
     nuevos = {f"j{i}": ev / "3 Imagen AI" / f"DSC{1000 + i}.jpg" for i in range(3)}
     nuevos.update({f"f{i}": ev / "4 Fotos finales" / f"{i + 1}.jpg" for i in range(3)})
-    nuevos["v"] = ev / "5 Presentación de fotos" / "Presentación.mp4"
+    nuevos["v"] = ev / "6 Presentación de fotos" / "Presentación.mp4"
     assert all(os.stat(nuevos[k]).st_ino == inodos[k] for k in inodos)  # los mismos archivos: nada copiado ni borrado
     assert core.migrate_event_layout(ev) == []                          # otra vez: nada que hacer
     td.write(dngs / "Imagen AI" / "DSC9999.jpg", JPG_IMAGEN)            # restos en el sitio viejo: se juntan
     assert core.migrate_event_layout(ev) and (ev / "3 Imagen AI" / "DSC9999.jpg").exists()
     assert not (dngs / "Imagen AI").exists() and len(list((ev / "3 Imagen AI").glob("*.jpg"))) == 4
+    ev2 = td._evento_tandas(2)                                          # evento hecho con 4.22: «5 Presentación»
+    v = td.write(ev2 / "5 Presentación de fotos" / "Presentación.mp4", b"MP4")
+    ino = os.stat(v).st_ino
+    core.migrate_event_layout(ev2)
+    assert os.stat(ev2 / "6 Presentación de fotos" / "Presentación.mp4").st_ino == ino and not (ev2 / "5 Presentación de fotos").exists()
 
 
 @prueba("Comprobado: al acabar cada paso se revisa SU carpeta (fotos, DNG completos, con Imagen una a una, retocadas) "
@@ -1357,8 +1362,8 @@ def p55():
     por = {i: (st, c) for i, st, c in vistos}
     assert por[0] == ("ok", "6 fotos") and por[1] == ("ok", "6 buenas · 0 malas") and por[2] == ("ok", "6 DNG"), por
     assert por[3] == ("ok", "6 con Imagen") and por[4] == ("ok", "6 retocadas"), por
-    assert por[6] == ("ok", "6 con Imagen"), por                       # revisión final
-    assert set(live.checks()) >= {0, 1, 2, 3, 4, 6}
+    assert por[core.STEP_FINAL] == ("ok", "6 con Imagen"), por        # revisión final
+    assert set(live.checks()) >= {0, 1, 2, 3, 4, core.STEP_FINAL}
     ev2 = td._evento_tandas(4)                                        # una foto SIN Imagen: se ve como aviso
     d2 = con_dng_y_jpg(ev2, 4)
     (d2.parent / core.IMAGEN_SUBFOLDER / "DSC1001.jpg").write_bytes(b"J" * 1000)
@@ -1449,6 +1454,115 @@ def p66():
         w.shutdown()
         w.deleteLater()
         app.processEvents()
+
+
+@prueba("Memoria con DOS eventos (boda y XV): sin pulsar «2 eventos» es uno (el botón lo sugiere); pulsado, cada uno va "
+        "a su carpeta («Nombre - Evento 1» y «- Evento 2»), uno detrás de otro, y la memoria se expulsa al terminar el último")
+def p67():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from rawflow import app as ra
+    base = td.fresh("p67")
+    card = base / "MEMORIA"
+    t0 = time.time() - 5 * 86400
+    files = []
+    for i in range(30):                                             # sábado: boda
+        files.append(td.raw(card, f"DSC{1000 + i}.ARW", i))
+        os.utime(files[-1].path, (t0 + i * 60, t0 + i * 60))
+    for i in range(25):                                             # domingo: XV
+        files.append(td.raw(card, f"DSC{2000 + i}.ARW", 100 + i))
+        t = t0 + 86400 + i * 60
+        os.utime(files[-1].path, (t, t))
+    files = core.scan_paths([str(card)], "MEMORIA")
+    w = ra.MainWindow()
+    w.btn_auto.blockSignals(True)
+    w.btn_auto.setChecked(False)
+    w.btn_auto.blockSignals(False)
+    w._log = lambda m: None
+    w.base_dir = str(base / "Escritorio")
+    w.name_edit.setText("Fin de semana")
+    corridas = []
+    w._run = lambda ev, fs, eject, start, copy_roots=(): corridas.append((Path(ev).name, len(fs), list(eject)))
+    w._missing_apps = lambda: []
+    from unittest import mock
+    w.cards = {"MEMORIA": mock.MagicMock(selected=True)}
+    w.results = {"MEMORIA": files}
+    w.dropped = {}
+    orig = (core.list_drives, core.reveal_in_file_manager)
+    core.list_drives = lambda *a, **k: []                          # nada de memorias ni Explorador de verdad
+    core.reveal_in_file_manager = lambda *a, **k: None
+    try:
+        assert [len(g) for g in w._event_groups(files)] == [55], "sin pulsar «2 eventos»: un solo evento"
+        assert w.btn_events.text() == "¿2 eventos?", w.btn_events.text()      # pero lo sugiere (1 día de hueco)
+        w.btn_events.setChecked(True)                                         # lo pulsas
+        assert [len(g) for g in w._event_groups(files)] == [30, 25]
+        w._start()
+        assert corridas == [("Fin de semana - Evento 1", 30, [])], corridas      # el primero, sin expulsar
+        ev1 = base / "Escritorio" / "Fin de semana - Evento 1"
+        ev1.mkdir(parents=True)
+        w._after_finish(str(ev1), "", {})
+        deadline = time.monotonic() + 5
+        while len(corridas) < 2 and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.05)
+        assert corridas[1] == ("Fin de semana - Evento 2", 25, ["MEMORIA"]), corridas   # el último expulsa
+        assert not w._event_queue
+    finally:
+        core.list_drives, core.reveal_in_file_manager = orig
+        w.cards = {}
+        w.shutdown()
+        w.deleteLater()
+        app.processEvents()
+
+
+@prueba("Paso 6 · Luminar: «CINEMA AJUSTE» a las fotos finales → «5 Fotos finales Luminar» y CineSlide hace la "
+        "presentación CON ESAS; desactivado (doble clic), las de Retouch4me; si Luminar falla del todo, el evento acaba "
+        "igual con aviso y se entregan las de Retouch4me")
+def p68():
+    from rawflow import luminar_win as L, pipeline as pl
+    llamadas, usadas = [], []
+
+    def run_ok(ev, src, out, log, should_stop=lambda: False, progress=lambda f: None):
+        llamadas.append(Path(src).name)
+        out.mkdir(parents=True, exist_ok=True)
+        for q in sorted(Path(src).glob("*.jpg")):
+            td.write(out / q.name, b"LUMINAR" + q.read_bytes())
+        return len(list(out.glob("*.jpg")))
+
+    def run_mal(*a, **k):
+        raise RuntimeError("Luminar no abrió (prueba)")
+
+    def present(self_):
+        usadas.append(pl.deliver_dir(self_.ev_dir, self_.off).name)
+        return "done"
+    for caso, run, off in (("bien", run_ok, set()), ("apagado", run_ok, {core.STEP_LUM}), ("falla", run_mal, set())):
+        ev = td._evento_tandas(4)
+        con_dng_y_jpg(ev, 4)
+        fin = ev / core.FINAL_SUBFOLDER
+        for i in range(4):
+            td.write(fin / f"{i + 1}.jpg", JPG_IMAGEN)
+        llamadas.clear()
+        usadas.clear()
+        with td._Falsos() as f:
+            f._set(L, "available", lambda: (True, ""))
+            f._set(L, "run", run)
+            f._set(pl.Pipeline, "_present", present)
+            f._set(pl.Pipeline, "_reset_app", lambda self_, i: None)
+            f._set(time, "sleep", lambda s: None)
+            p = pl.Pipeline(ev, [], DXO, "CINEMA", [], core.STEP_LUM, off=off)
+            p._run_steps()
+        assert "failed_step" not in p.summary, (caso, p.summary)
+        lum = ev / core.LUMINAR_SUBFOLDER
+        if caso == "bien":
+            assert llamadas == ["4 Fotos finales"] and len(list(lum.glob("*.jpg"))) == 4, llamadas
+            assert usadas == [core.LUMINAR_SUBFOLDER], usadas                       # la presentación, con Luminar
+        elif caso == "apagado":
+            assert not llamadas and not lum.exists() and usadas == [core.FINAL_SUBFOLDER], (llamadas, usadas)
+        else:
+            assert len(llamadas) == 0 and usadas == [core.FINAL_SUBFOLDER], usadas
+            assert any("Luminar" in a for a in p.summary.get("avisos", [])), p.summary
+            assert p.summary.get("sin_luminar")
 
 
 # ======================================================================= Selección IA (tomas malas, antes de DxO)
@@ -1586,10 +1700,10 @@ def p60():
             self[k] = v
     w = type("W", (), {})()
     w.settings = Ajustes({"pasos_desactivados": "2,3,4", "seleccion_ia": False, "pendiente_paso": 3})
-    assert ra.MainWindow._load_steps_off(w) == {1, 3, 4, 5}
+    assert ra.MainWindow._load_steps_off(w) == {1, 3, 4, core.STEP_PRES}
     assert w.settings["pasos_apagados"].split(",") == ["Imagen AI", "Retouch4me", "CineSlide", "Selección IA"]
     assert w.settings["pendiente_paso"] == 4 and w.settings["pasos_version"] == 2     # Retouch4me sigue siendo Retouch4me
-    assert ra.MainWindow._load_steps_off(w) == {1, 3, 4, 5} and w.settings["pendiente_paso"] == 4   # solo una vez
+    assert ra.MainWindow._load_steps_off(w) == {1, 3, 4, core.STEP_PRES} and w.settings["pendiente_paso"] == 4   # solo una vez
     nuevo = type("W", (), {})()
     nuevo.settings = Ajustes()
     assert ra.MainWindow._load_steps_off(nuevo) == set() and nuevo.settings["pasos_apagados"] == ""

@@ -8,4 +8,8 @@ Modelos de la Selección IA en Windows (rawflow/seleccion_win.py). Van dentro de
   mobilenet_v3_large.tflite           Huella de la foto, para el parecido entre tomas (MediaPipe Image Embedder). Google, Apache 2.0.
       https://storage.googleapis.com/mediapipe-models/image_embedder/mobilenet_v3_large/float32/1/mobilenet_v3_large.tflite
 
-Los tres se ejecutan con OpenCV (cv2.dnn), sin internet. En el Mac no se usan: allí mide la IA de Apple (Vision).
+  face_recognition_sface_2021dec_int8.onnx   Reconocimiento de caras SFace (int8). OpenCV Zoo, Apache 2.0.
+      https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface
+      (solo para ver si dos tramos de una memoria son la MISMA gente = el mismo evento; no guarda ninguna cara)
+
+Se ejecutan con OpenCV (cv2.dnn), sin internet. En el Mac no se usan: allí mide la IA de Apple (Vision).

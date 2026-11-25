@@ -552,6 +552,90 @@ def _after_one(k: int, total: int, t0: float, log, progress) -> None:
             + (f"  ·  quedan {int((total - k) * el / k)} s" if k < total else ""))
 
 
+# ------------------------------------------------------------------------- ¿la misma gente? (uno o dos eventos)
+FACE_ID = "face_recognition_sface_2021dec_int8.onnx"
+PEOPLE_N = 80            # fotos repartidas a lo largo de cada tramo
+PEOPLE_K = 40            # se comparan sus 40 caras más grandes (los protagonistas, no el fondo)
+PEOPLE_MIN_W = 80        # px de la cara en la vista de 1600: más pequeñas no se reconocen bien
+PEOPLE_MATCH = 0.5       # coseno SFace: «es la misma persona» (estricto: con 0,363 los invitados del fondo se parecían)
+PEOPLE_MIN_FACES = 8     # con menos caras claras a un lado, no se opina
+_PEOPLE_CACHE: Dict[tuple, Optional[float]] = {}
+
+
+def _group_key(files) -> tuple:
+    return (len(files), str(files[0].path), str(files[-1].path)) if files else (0, "", "")
+
+
+def people_cached(before, after) -> Optional[float]:
+    """Lo ya medido por people_overlap (o None): para la ventana, que nunca debe esperar."""
+    return _PEOPLE_CACHE.get((_group_key(before), _group_key(after)))
+
+
+def people_overlap(before, after, should_stop: Callable[[], bool] = lambda: False) -> Optional[float]:
+    """Qué parte de las caras principales de un tramo son personas del otro (0..1), o None si no hay caras claras
+    suficientes o no se puede medir. Medido (24-nov-2026) en 5 eventos reales: el MISMO evento 28-71 %; eventos
+    DISTINTOS 0 % en los 12 pares (BODA 14 NOV: el día de la boda frente al día siguiente 2 %; las dos tandas del
+    día siguiente entre sí 60 %)."""
+    import numpy as np
+    k = (_group_key(before), _group_key(after))
+    if k in _PEOPLE_CACHE:
+        return _PEOPLE_CACHE[k]
+    ok, _ = available()
+    d = _models_dir()
+    if not ok or not (d / FACE_ID).exists():
+        return None
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    local = threading.local()
+
+    def faces(path):
+        if should_stop():
+            return []
+        if getattr(local, "e", None) is None:
+            import cv2
+            local.e = Engine()
+            buf = np.frombuffer((d / FACE_ID).read_bytes(), dtype=np.uint8)        # en memoria (rutas con acentos)
+            local.r = cv2.FaceRecognizerSF.create("onnx", buf, np.empty(0, np.uint8))
+        e, rec = local.e, local.r
+        try:
+            big, _ = read_raw(path)
+        except Exception:  # noqa: BLE001
+            return []
+        if big is None:
+            return []
+        H, W = big.shape[:2]
+        s = PREVIEW / max(H, W)
+        img = e.cv2.resize(big, (max(1, int(W * s)), max(1, int(H * s))), interpolation=e.cv2.INTER_AREA) if s < 1 else big
+        e.det.setInputSize((img.shape[1], img.shape[0]))
+        e.det.setScoreThreshold(0.9)
+        _, fs = e.det.detect(img)
+        out = []
+        for f in (fs if fs is not None else []):
+            if f[2] >= PEOPLE_MIN_W:
+                v = rec.feature(rec.alignCrop(img, f)).ravel().astype(np.float32)
+                out.append((float(f[2]), v / (float(np.linalg.norm(v)) + 1e-9)))
+        return out
+
+    def side(files):
+        n = min(PEOPLE_N, len(files))
+        pick = [files[int(i * (len(files) - 1) / max(1, n - 1))] for i in range(n)]
+        with ThreadPoolExecutor(max_workers=workers(n), thread_name_prefix="personas") as ex:
+            got = [x for lst in ex.map(lambda f: faces(str(f.path)), pick) for x in lst]
+        got.sort(key=lambda x: -x[0])
+        return np.array([v for _, v in got[:PEOPLE_K]])
+
+    a, b = side(before), side(after)
+    if should_stop():
+        return None
+    if len(a) < PEOPLE_MIN_FACES or len(b) < PEOPLE_MIN_FACES:
+        res = None
+    else:
+        sim = b @ a.T
+        res = round(float(((sim.max(axis=1) >= PEOPLE_MATCH).mean() + (sim.max(axis=0) >= PEOPLE_MATCH).mean()) / 2), 3)
+    _PEOPLE_CACHE[k] = res
+    return res
+
+
 def rescue(rows: List[dict], req: Dict[int, List[list]], path_of: Callable[[str], Path]) -> int:
     """Vuelve a buscar las caras que no se vieron en una toma, cada una en su sitio (zona pequeña y ampliada: ahí sí
     se ven), y las añade; las que no aparecen quedan como «ocultas». Como «rfui caras». Devuelve cuántas encontró."""

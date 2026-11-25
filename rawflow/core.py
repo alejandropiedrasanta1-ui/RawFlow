@@ -289,8 +289,8 @@ class ScanResult:
         return dt.date.fromtimestamp(min(ts)), dt.date.fromtimestamp(max(ts))
 
 
-EVENT_DIRS = ("1 original", "2 dngs", "3 imagen ai", "3 jpeg sin imagen", "4 fotos finales", "5 presentaci",
-              "fotos buenas", "fotos malas",
+EVENT_DIRS = ("1 original", "2 dngs", "3 imagen ai", "3 jpeg sin imagen", "4 fotos finales", "5 fotos finales luminar",
+              "5 presentaci", "6 presentaci", "fotos buenas", "fotos malas",
               "3 fotos finales", "4 presentaci")      # carpetas de un evento de RawFlow (también las de antes de 4.15)
 
 
@@ -390,6 +390,122 @@ def unique_folder(path: Path) -> Path:
     while (path.parent / f"{path.name} {n}").exists():
         n += 1
     return path.parent / f"{path.name} {n}"
+
+
+EVENT_GAP = 4 * 3600     # s sin fotos a partir de los que PUEDE ser otro evento (medido 24-nov-2026: dentro de una
+#                          boda o unos XV el hueco más largo fue 1,6 h)
+EVENT_GAP_SURE = 8 * 3600   # …y a partir de los que SEGURO lo es (pasó la noche: «BODA 14 NOV YO», 9,6 h). Entre 4 y 8 h
+#                          es dudoso (iglesia por la mañana y fiesta por la noche, o dos eventos el mismo día): se pregunta
+EVENT_MIN = 20           # un grupito de menos fotos (pruebas de cámara…) no es un evento: va con el más cercano
+
+
+_SHOT_CACHE: dict = {}
+
+
+def shot_time(f: RawFile) -> float:
+    """Hora de la TOMA (EXIF del RAW: solo se lee su cabecera) o, si no la trae (CR3…), la del archivo. La del archivo
+    no basta: si las fotos se copiaron o tocaron después, es la de ese momento («14 NOV ZONA 11 BODA»: tomadas el
+    13-14 nov, archivos del 16-18)."""
+    k = (f.path, f.size, f.mtime)
+    if k not in _SHOT_CACHE:
+        t = None
+        try:
+            import mmap
+            from . import seleccion_win as _sw          # (lectura del TIFF en Python puro: vale en Mac y Windows)
+            with open(f.path, "rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as m:
+                tf = _sw._tiff(m)
+            t = _sw._exif_time(tf["exif"]) if tf else None
+        except (OSError, ValueError, KeyError):
+            t = None
+        _SHOT_CACHE[k] = t if t is not None else f.mtime
+    return _SHOT_CACHE[k]
+
+
+SAME_PEOPLE = 0.15      # caras principales de un lado que son alguien del otro: ≥15 % = la MISMA gente (mismo evento:
+DIFF_PEOPLE = 0.05      # medido 28-71 %) · ≤5 % = OTRA gente (eventos distintos: medido 0 % en 12 pares). En medio, o
+#                         sin caras claras, deciden las horas
+
+
+def split_events(files: List[RawFile], gap: float = EVENT_GAP, min_size: int = EVENT_MIN,
+                 when: Callable[[RawFile], float] = shot_time, sure: float = EVENT_GAP_SURE,
+                 doubtful: Optional[Callable[[List[RawFile], List[RawFile], float], bool]] = None,
+                 people: Optional[Callable[[List[RawFile], List[RawFile]], Optional[float]]] = None
+                 ) -> List[List[RawFile]]:
+    """Separa las fotos en eventos por los HUECOS de tiempo entre tomas (no por la fecha: el reloj de la cámara puede
+    estar mal; en «BODA 14 NOV YO» marcaba 2018) y por la GENTE: people(antes, después) dice qué parte de las caras
+    principales se repite (seleccion_win.people_overlap). La misma gente = el mismo evento, aunque pase la noche; otra
+    gente = otro evento, aunque sea el mismo día. Sin opinión de las caras: un hueco de `sure` o más separa; uno entre
+    `gap` y `sure` separa solo si doubtful(antes, después, segundos) dice True. Dos memorias del mismo evento (dos
+    cámaras) se juntan solas porque sus fotos se intercalan. Devuelve los eventos en orden, cada uno por hora."""
+    groups = _gap_groups(files, gap, min_size, when)
+    out: List[List[RawFile]] = groups[:1]
+    for prev, g in zip(groups, groups[1:]):
+        hole = when(g[0]) - when(prev[-1])
+        ov = people(prev, g) if people is not None else None
+        if ov is not None and ov >= SAME_PEOPLE:
+            split = False
+        elif ov is not None and ov <= DIFF_PEOPLE:
+            split = True
+        else:
+            split = hole >= sure or (doubtful is not None and doubtful(out[-1], g, hole))
+        if split:
+            out.append(g)
+        else:
+            out[-1] = out[-1] + g
+    return out
+
+
+def candidate_gaps(files: List[RawFile], when: Callable[[RawFile], float] = shot_time) -> List[tuple]:
+    """Los tramos vecinos separados por un hueco ≥ EVENT_GAP: [(antes, después)]. Es lo que mide people_overlap."""
+    g = _gap_groups(files, EVENT_GAP, EVENT_MIN, when)
+    return list(zip(g, g[1:]))
+
+
+def split_in_two(files: List[RawFile], when: Callable[[RawFile], float] = shot_time) -> List[List[RawFile]]:
+    """Dos eventos sí o sí (lo pediste con el botón y la detección no encontró dónde): por el hueco más largo, sin
+    dejar un trozo de menos de EVENT_MIN fotos."""
+    fs = sorted(files, key=when)
+    if len(fs) < 2 * EVENT_MIN:
+        return [fs] if fs else []
+    i = max(range(EVENT_MIN, len(fs) - EVENT_MIN + 1), key=lambda j: when(fs[j]) - when(fs[j - 1]))
+    return [fs[:i], fs[i:]]
+
+
+def doubtful_gaps(files: List[RawFile], when: Callable[[RawFile], float] = shot_time) -> List[tuple]:
+    """Los huecos dudosos (entre EVENT_GAP y EVENT_GAP_SURE): [(fotos antes, fotos después, segundos)], para preguntar."""
+    found: List[tuple] = []
+    split_events(files, when=when, doubtful=lambda a, b, s: found.append((a, b, s)) or False)
+    return found
+
+
+def _gap_groups(files: List[RawFile], gap: float, min_size: int, when) -> List[List[RawFile]]:
+    """Grupos separados por huecos ≥ `gap`, con los grupitos (< min_size) juntados a su vecino más cercano."""
+    fs = sorted(files, key=when)
+    if not fs:
+        return []
+    groups: List[List[RawFile]] = [[fs[0]]]
+    for a, b in zip(fs, fs[1:]):
+        if when(b) - when(a) >= gap:
+            groups.append([b])
+        else:
+            groups[-1].append(b)
+    while len(groups) > 1:                           # los grupitos se juntan con el vecino más cercano en el tiempo
+        small = min(range(len(groups)), key=lambda i: len(groups[i]))
+        if len(groups[small]) >= min_size:
+            break
+        g = groups.pop(small)
+        if small == 0:
+            groups[0] = g + groups[0]
+        elif small == len(groups):
+            groups[-1] += g
+        else:
+            before = when(g[0]) - when(groups[small - 1][-1])
+            after = when(groups[small][0]) - when(g[-1])
+            if before <= after:
+                groups[small - 1] += g
+            else:
+                groups[small] = g + groups[small]
+    return groups
 
 
 def event_folder(base: str, date: dt.date, event_name: str) -> Path:
@@ -909,8 +1025,8 @@ def human_size(n: float) -> str:
 DEFAULT_PRESET = "CINEMA"
 # Carpeta del evento: una carpeta numerada por paso, en el orden en que trabajan (el Finder las muestra así)
 # los pasos, por nombre (su número es la posición): así añadir un paso no descoloca nada
-STEP_MOVE, STEP_SEL, STEP_DXO, STEP_IMG, STEP_RET, STEP_PRES = range(6)
-STEP_FINAL = 6                               # la revisión final (panel COMPROBADO), después del último paso
+STEP_MOVE, STEP_SEL, STEP_DXO, STEP_IMG, STEP_RET, STEP_LUM, STEP_PRES = range(7)
+STEP_FINAL = 7                               # la revisión final (panel COMPROBADO), después del último paso
 
 RAW_SUBFOLDER = "1 Original"                 # 1 Mover: los RAW
 GOOD_SUBFOLDER = "Fotos buenas"              # 2 Selección IA: dentro de «1 Original», las que siguen el proceso
@@ -919,7 +1035,8 @@ OUTPUT_SUBFOLDER = "2 DNGs"                  # 2 DxO
 IMAGEN_SUBFOLDER = "3 Imagen AI"             # 3 Imagen + Bridge: JPEG con las ediciones de Imagen
 JPEG_SIN_SUBFOLDER = "3 JPEG sin Imagen"     # 3 si Imagen está desactivado (doble clic): Bridge tal cual
 FINAL_SUBFOLDER = "4 Fotos finales"          # 4 Retouch4me retoca las de «3 Imagen AI»
-PRES_SUBFOLDER = "5 Presentación de fotos"   # 5 CineSlide
+LUMINAR_SUBFOLDER = "5 Fotos finales Luminar"  # 5 Luminar Neo: preajuste «CINEMA AJUSTE» a las finales (24-nov-2026)
+PRES_SUBFOLDER = "6 Presentación de fotos"   # 6 CineSlide (hasta 4.22 era «5 Presentación de fotos»: se migra)
 
 
 def migrate_event_layout(ev) -> List[str]:
@@ -927,7 +1044,8 @@ def migrate_event_layout(ev) -> List[str]:
     en el orden de los pasos. Solo cambia carpetas de sitio (renombrar: instantáneo): no copia ni borra ninguna foto.
     Si ya existen las dos, junta lo que falte en la nueva. Devuelve lo que movió."""
     ev = Path(ev)
-    moves = [(ev / "4 Presentación de fotos", ev / PRES_SUBFOLDER),          # primero las de número más alto
+    moves = [(ev / "5 Presentación de fotos", ev / PRES_SUBFOLDER),          # primero las de número más alto
+             (ev / "4 Presentación de fotos", ev / PRES_SUBFOLDER),          # (4.23: Luminar es el paso 5)
              (ev / "3 Fotos finales", ev / FINAL_SUBFOLDER),
              (ev / OUTPUT_SUBFOLDER / "Imagen AI", ev / IMAGEN_SUBFOLDER),
              (ev / OUTPUT_SUBFOLDER / "JPEG sin Imagen", ev / JPEG_SIN_SUBFOLDER)]

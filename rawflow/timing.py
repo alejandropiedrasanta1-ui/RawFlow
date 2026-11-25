@@ -22,6 +22,7 @@ SEED: Dict[str, Tuple[float, float]] = {        # fase: (segundos fijos, segundo
     "imagen": (200.0, 2.0),                      # crear proyecto + subir + editar en la nube + descargar
     "bridge": (22.0, 3.0),                       # abrir Bridge + exportar JPEG calidad 12
     "ret": (3.0, 58.0),                          # Retouch4me por motor directo (CINEMA: Stray Hairs ~45 s)
+    "lum": (60.0, 1.5),                          # Luminar Neo: abrir + catálogo + preajuste + exportar (se aprende)
     "pres": (7.0, 2.5),                          # CineSlide tema 4
 }
 MOVE_BPS = 90e6                                   # lectura típica de tarjeta por USB (se aprende)
@@ -125,7 +126,7 @@ class Estimator:
 
     def estimate(self, n: int, nbytes: int) -> List[float]:
         if n <= 0:
-            return [0, 0, 0, 0, 0, 0]
+            return [0, 0, 0, 0, 0, 0, 0]
         h = _history()
 
         def p(ph):
@@ -140,7 +141,8 @@ class Estimator:
         small = sum(b for _, b, _ in h.get("imagen", [])[-5:]) / max(1, len(h.get("imagen", [])[-5:]))
         upload = max(0.0, dng_bytes - small) / upload_bps(h)
         sel = _sel_time(n)                               # Selección IA: por foto (vista previa del RAW)
-        est = [max(2.0, nbytes / _move_bps(h)), sel, p("dxo"), p("imagen") + upload + p("bridge"), p("ret"), p("pres")]
+        est = [max(2.0, nbytes / _move_bps(h)), sel, p("dxo"), p("imagen") + upload + p("bridge"), p("ret"), p("lum"),
+               p("pres")]
         k = _tanda1(n)
         if k:       # por tandas: la subida a Imagen va mientras DxO trabaja; después solo la última tanda + Bridge
             f_img, spp_img, _ = model("imagen", h)
@@ -174,6 +176,8 @@ class Estimator:
             n_fin = len([q for q in fin.glob("*.jp*g")]) if fin.is_dir() else 0
             pres = ev / core.PRES_SUBFOLDER
             has_pres = pres.is_dir() and any(pres.glob("*.mp4"))
+            lum = ev / core.LUMINAR_SUBFOLDER
+            n_lum = len([q for q in lum.glob("*.jp*g")]) if lum.is_dir() else 0
             if done_dng:                                       # sin DNG aún: lo de estimate() (tandas incluidas)
                 est[2] = p("dxo", pend_dng)
                 est[1] = _sel_time(pend_dng)                  # la Selección IA solo mira las que aún no tienen DNG
@@ -182,14 +186,15 @@ class Estimator:
             elif (dngs / ".rawflow_imagen_ok").exists():
                 est[3] = p("bridge", n)                       # Imagen ya editó: solo falta Bridge
             est[4] = p("ret", max(0, n - n_fin))
-            est[5] = 0.0 if has_pres else est[5]
+            est[5] = 0.0 if n_fin and n_lum >= n_fin else est[5]
+            est[6] = 0.0 if has_pres else est[6]
         except Exception:  # noqa: BLE001
             pass
         return [0.0 if i < start else e for i, e in enumerate(est)]
 
     def learn(self, step: int, seconds: float, n: int, nbytes: int):
         """Paso terminado con trabajo real. El paso 3 lo guarda imagen_ui por partes (nube / Bridge)."""
-        phase = {0: "move", 2: "dxo", 4: "ret", 5: "pres"}.get(step)   # STEP_MOVE, STEP_DXO, STEP_RET, STEP_PRES
+        phase = {0: "move", 2: "dxo", 4: "ret", 5: "lum", 6: "pres"}.get(step)   # STEP_MOVE, _DXO, _RET, _LUM, _PRES
         if phase and (phase == "move" or seconds > 3):      # «ya estaba hecho» no cuenta
             record(phase, n, nbytes, seconds)
 

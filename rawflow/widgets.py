@@ -537,6 +537,7 @@ class DriveCard(QFrame):
         self.found = 0
         self.found_bytes = 0
         self.formats: List[str] = []
+        self.events = 0                          # eventos que trae (separados por horas sin fotos); 0 = sin saber
         self._hover = False
         self._pressed = False
         self._sel, self._hov = 1.0, 0.0          # 0..1: cuánto de «marcada» y de «ratón encima» (se animan)
@@ -570,6 +571,11 @@ class DriveCard(QFrame):
         self.found, self.found_bytes, self.formats = found, found_bytes, formats
         self._timer.stop()
         self.update()
+
+    def set_events(self, n: int):
+        if n != self.events:
+            self.events = n
+            self.update()
 
     def _tick(self):
         self._phase = (self._phase + 0.01) % 1.0
@@ -754,6 +760,8 @@ class DriveCard(QFrame):
         else:
             p.setPen(mix(QColor(T.MUTED), QColor(T.ACCENT), sel))
             txt = f"{self.found:,} RAW  ·  {human_size(self.found_bytes)}"
+            if self.events:
+                txt += f"  ·  {self.events} evento{'s' if self.events != 1 else ''}"
             p.drawText(QPointF(bar.left(), ty), txt)
             fm = QFontMetrics(p.font())
             p.setPen(QColor(T.MUTED))

@@ -123,6 +123,21 @@ class ScanWorker(QThread):
             # skip_events: en un disco externo de trabajo (que también sale como «memoria») jamás se entra en las
             # carpetas de eventos ya hechos: sus RAW y sus DNG se movían al evento nuevo, vaciando los anteriores
             files = core.scan_drive(self.key, prog, lambda: self._stop, skip_events=True)
+        for f in files:                     # la hora de cada TOMA (para ver si la memoria trae varios eventos): aquí,
+            if self._stop:                  # en segundo plano, y no al pintar el resumen (≈5 ms por foto)
+                return
+            core.shot_time(f)
+        # ¿uno o varios eventos? En cada hueco de 4 h o más se mira si es la MISMA gente (≈8 s por hueco; solo si los
+        # hay). Lo usa el botón «2 eventos» (se ilumina si son dos claros) y dónde separar si lo pulsas.
+        if core.SYSTEM == "Windows" and os.environ.get("RAWFLOW_SIN_APPS") != "1":
+            try:
+                from . import seleccion_win
+                for a, b in core.candidate_gaps(files):
+                    if self._stop:
+                        return
+                    seleccion_win.people_overlap(a, b, lambda: self._stop)
+            except Exception:  # noqa: BLE001  (sin caras: deciden las horas)
+                pass
         if not self._stop:
             self.finished_scan.emit(self.key, files)
 
@@ -742,6 +757,19 @@ class MainWindow(QMainWindow):
         self.name_edit.textChanged.connect(self._update_dest)
         self.name_edit.returnPressed.connect(lambda: self.go.isEnabled() and self._start())
         row.addWidget(self.name_edit, 1)
+        # Botón sutil «2 eventos» (pedido del usuario): sin pulsarlo, todo es UN evento. Pulsado, RawFlow separa y
+        # la detección (horas + caras) dice DÓNDE. Si la detección ve dos eventos claros, se ilumina: «¿2 eventos?».
+        self.multi_event = False
+        self.btn_events = QPushButton("2 eventos", objectName="chipButton")
+        self.btn_events.setCheckable(True)
+        self.btn_events.setFixedHeight(30)
+        self.btn_events.setCursor(Qt.CursorShape.PointingHandCursor)
+        set_button_icon(self.btn_events, "ph.copy-simple", T.MUTED, 14)
+        self.btn_events.setToolTip("¿La memoria trae dos eventos (p. ej. una boda y unos XV)? Púlsalo y cada uno irá a "
+                                   "su carpeta. Si no lo pulsas, todo es un solo evento.")
+        self.btn_events.toggled.connect(self._events_toggled)
+        self.btn_events.hide()
+        row.addWidget(self.btn_events, 0, Qt.AlignmentFlag.AlignVCenter)
         el.addLayout(row)
         drow = QHBoxLayout()
         drow.setSpacing(8)
@@ -898,6 +926,37 @@ class MainWindow(QMainWindow):
             self._update_summary()
         except Exception:  # noqa: BLE001
             pass
+
+    # ------------------------------------------------------------ telemetrías de Windows (una vez por equipo)
+    def offer_telemetry_off(self):
+        """Si este Windows tiene las telemetrías activas, se pregunta UNA vez y se desactivan con el permiso de
+        administrador (el aviso de Windows). La respuesta se recuerda: no vuelve a preguntar."""
+        if core.SYSTEM != "Windows" or os.environ.get("RAWFLOW_SIN_APPS") == "1":
+            return
+        if self.settings.value("telemetria_preguntada", False, type=bool):
+            return
+        if self.pipe is not None and self.pipe.isRunning():
+            QTimer.singleShot(60_000, self.offer_telemetry_off)       # con un evento en marcha, luego
+            return
+        from . import winopt
+        try:
+            if winopt.disabled():
+                self.settings.setValue("telemetria_preguntada", True)
+                return
+        except Exception:  # noqa: BLE001
+            return
+        r = QMessageBox.question(
+            self, APP_NAME, "Para que RawFlow vaya más fluido, ¿desactivo las telemetrías de Windows en este equipo?\n\n"
+            "Windows pedirá permiso de administrador una sola vez. Quedan desactivadas para siempre (servicio de "
+            "telemetría y tareas que recogen datos). Se puede deshacer.")
+        self.settings.setValue("telemetria_preguntada", True)
+        if r != QMessageBox.StandardButton.Yes:
+            return
+        ok = winopt.run_elevated()
+        self._log("Telemetrías de Windows: " + ("desactivadas." if ok else "no se desactivaron (¿dijiste «No» en el "
+                                                                         "aviso de Windows?)."))
+        self.status.setText("✓  Telemetrías de Windows desactivadas en este equipo." if ok else
+                            "No se desactivaron las telemetrías de Windows.")
 
     # ------------------------------------------------------------ actualizaciones
     def start_update_check(self):
@@ -1205,6 +1264,22 @@ class MainWindow(QMainWindow):
         self.cards[key].set_done(len(files), res.total_bytes, [f for f, _ in res.by_format().most_common()])
         self._update_summary()
 
+    # ------------------------------------------------------------ ¿uno o varios eventos? (botón «2 eventos»)
+    @staticmethod
+    def _people(before, after):
+        """La gente que se repite entre dos tramos, ya medida al analizar la memoria (nunca se mide aquí: la ventana
+        no espera). None si no se midió o no hay caras claras."""
+        try:
+            from . import seleccion_win
+            return seleccion_win.people_cached(before, after)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _events_toggled(self, on: bool):
+        self.multi_event = bool(on)
+        self._groups_key = None
+        self._update_summary()
+
     # ------------------------------------------------------------ resumen
     def _selected_files(self) -> List[core.RawFile]:
         out: List[core.RawFile] = []
@@ -1255,7 +1330,28 @@ class MainWindow(QMainWindow):
             elif not files:
                 self.status.setText("No hay fotos RAW en las memorias seleccionadas.")
             else:
-                self.status.setText("Escribe el nombre del evento y pulsa Empezar.")
+                groups = self._event_groups(files) if not scanning else []
+                if len(groups) > 1:
+                    fmt_d = lambda f: core.date_name(core.dt.date.fromtimestamp(core.shot_time(f)))  # noqa: E731
+                    self.status.setText(
+                        f"{len(groups)} eventos → {len(groups)} carpetas:  " + "  ·  ".join(
+                            f"Evento {i}: {fmt_d(g[0])}, {len(g):,} fotos" for i, g in enumerate(groups, 1)))
+                    self.status.setToolTip("La memoria trae varios eventos (hay horas sin fotos entre ellos): cada "
+                                           "uno va a su carpeta y se hacen uno detrás de otro.")
+                else:
+                    self.status.setText("Escribe el nombre del evento y pulsa Empezar.")
+                self._update_dest()
+        if hasattr(self, "btn_events"):
+            if not self.cards and self.btn_events.isChecked():   # sin memorias: la próxima empieza como UN evento
+                self.btn_events.blockSignals(True)
+                self.btn_events.setChecked(False)
+                self.btn_events.blockSignals(False)
+                self.multi_event = False
+            show = bool(files) and not scanning and not (self.pipe and self.pipe.isRunning())
+            if show:
+                self._event_groups(files)
+                self._paint_events_button()
+            self.btn_events.setVisible(show)
         updating = self._updating()
         self.go.setEnabled(bool(files) and not scanning and not updating)
         if files and not scanning:
@@ -1273,7 +1369,9 @@ class MainWindow(QMainWindow):
             self.timepanel.setVisible(bool(files) and not scanning)
             self.time_sep.setVisible(self.timepanel.isVisible())
         if not self.countdown_left:
-            self.go.setText(f"Empezar  ·  {len(files):,} fotos" if files else "Empezar")
+            n_ev = len(self._event_groups(files)) if files and not scanning else 1
+            self.go.setText((f"Empezar  ·  {n_ev} eventos  ·  {len(files):,} fotos" if n_ev > 1 else
+                             f"Empezar  ·  {len(files):,} fotos") if files else "Empezar")
         keys = tuple(sorted(k for k, c in self.cards.items() if c.selected and self.results.get(k)))
         if (self.btn_auto.isChecked() and files and not scanning and not self.countdown_left and not updating
                 and keys and keys != self.autorun_keys):
@@ -1375,8 +1473,71 @@ class MainWindow(QMainWindow):
         name = core.clean_name(self.name_edit.text()) or core.date_name()
         return core.unique_folder(Path(self.base_dir) / name)
 
+    def _event_groups(self, files) -> list:
+        """Los eventos que trae lo seleccionado (core.split_events), recordado mientras no cambien las fotos."""
+        multi = getattr(self, "multi_event", False)
+        key = (len(files), files[0].path if files else "", files[-1].path if files else "", multi)
+        if getattr(self, "_groups_key", None) != key:
+            self._groups_key = key
+            # lo que ve la detección (horas + caras), para iluminar el botón si hay dos eventos claros
+            self._suggested = core.split_events(files, people=self._people) if files else []
+            if not files:
+                self._groups = []
+            elif not multi:                        # sin pulsar «2 eventos»: un solo evento, siempre
+                self._groups = [sorted(files, key=core.shot_time)]
+            else:                                  # pulsado: separa, y la detección dice dónde
+                g = core.split_events(files, people=self._people, doubtful=lambda a, b, s: True)
+                self._groups = g if len(g) > 1 else core.split_in_two(files)
+            for k, card in self.cards.items():     # la memoria dice cuántos eventos lleva (solo si son varios)
+                try:
+                    card.set_events(len(self._groups) if len(self._groups) > 1 and card.selected else 0)
+                except AttributeError:
+                    pass
+            self._paint_events_button()
+        return self._groups
+
+    def _paint_events_button(self):
+        b = getattr(self, "btn_events", None)
+        if b is None:
+            return
+        n_sug = len(getattr(self, "_suggested", []) or [])
+        # estilo propio en cada estado (el «:checked» de Windows lo pintaba azul y el tono no se aplicaba al cambiar)
+        pill = "border-radius: 14px; padding: 0 12px; font-size: 12px; font-weight: 600;"
+        if self.multi_event:
+            n = len(self._groups)
+            b.setText(f"{n} eventos" if n > 1 else "2 eventos")
+            b.setStyleSheet(f"QPushButton {{ {pill} background: {T.ACCENT}; color: {T.ACCENT_INK}; "
+                            f"border: 1px solid {T.ACCENT}; }}")
+            set_button_icon(b, "ph.copy-simple", T.ACCENT_INK, 14)
+            b.setToolTip("Cada evento irá a su carpeta. Púlsalo otra vez para que sea uno solo.")
+        elif n_sug > 1:
+            b.setText(f"¿{n_sug} eventos?")
+            b.setStyleSheet(f"QPushButton {{ {pill} background: rgba(215,255,79,0.08); color: {T.ACCENT}; "
+                            f"border: 1px solid rgba(215,255,79,0.45); }} QPushButton:hover {{ border-color: {T.ACCENT}; }}")
+            set_button_icon(b, "ph.copy-simple", T.ACCENT, 14)
+            b.setToolTip(f"Parece que la memoria trae {n_sug} eventos (horas sin fotos y gente distinta). Púlsalo y "
+                         "cada uno irá a su carpeta. Si no, todo es un solo evento.")
+        else:
+            b.setText("2 eventos")
+            b.setStyleSheet("")
+            set_button_icon(b, "ph.copy-simple", T.MUTED, 14)
+            b.setToolTip("¿La memoria trae dos eventos (p. ej. una boda y unos XV)? Púlsalo y cada uno irá a su "
+                         "carpeta. Si no lo pulsas, todo es un solo evento.")
+
+    def _dests(self, n: int) -> List[Path]:
+        """Una carpeta por evento: «<nombre> - Evento 1», «<nombre> - Evento 2»… (sin pisar ninguna que ya exista)."""
+        name = core.clean_name(self.name_edit.text()) or core.date_name()
+        out: List[Path] = []
+        for i in range(1, n + 1):
+            p = core.unique_folder(Path(self.base_dir) / f"{name} - Evento {i}")
+            out.append(p)
+        return out
+
     def _update_dest(self, *_):
         d = self._dest()
+        n = len(getattr(self, "_groups", None) or []) if self.cards else 0
+        if n > 1:
+            d = Path(self.base_dir) / f"{core.clean_name(self.name_edit.text()) or core.date_name()} - Evento 1…{n}"
         self.dest_label.setText(str(d))
         self.tree.setText("Dentro:   " + "   ·   ".join(
             (core.RAW_SUBFOLDER, core.OUTPUT_SUBFOLDER, IMAGEN_DIR if STEP_IMG not in self.steps_off else JPEG_SIN_DIR,
@@ -1617,6 +1778,18 @@ class MainWindow(QMainWindow):
                 return
         eject = [k for k, c in self.cards.items() if c.selected and k not in self.dropped   # carpetas: nunca
                  and not _inside(dest, k)]         # ni el disco donde se crea el evento (se quedaría sin destino)
+        groups = self._event_groups(files)
+        self._event_queue = []
+        if len(groups) > 1:                        # la memoria trae varios eventos: cada uno en su carpeta, en orden,
+            dests = self._dests(len(groups))       # y la memoria se expulsa al terminar el ÚLTIMO
+            jobs = [(d, g, eject if i == len(groups) - 1 else [], self._copy_roots(d))
+                    for i, (d, g) in enumerate(zip(dests, groups))]
+            self._event_queue, self._event_total = jobs[1:], len(jobs)
+            self._log(f"La memoria trae {len(jobs)} eventos: " + " · ".join(f"«{d.name}» ({len(g):,} fotos)"
+                                                                           for d, g, _, _ in jobs))
+            d, g, ej, roots = jobs[0]
+            self._run(d, g, ej, 0, copy_roots=roots)
+            return
         self._run(dest, files, eject, 0, copy_roots=self._copy_roots(dest))
 
     def _retry(self):
@@ -2064,6 +2237,13 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             pass
         self._update_summary()
+        queue = getattr(self, "_event_queue", None)
+        if queue and not err:                  # la memoria traía varios eventos: el siguiente, en SU carpeta
+            nxt = queue.pop(0)
+            self._log(f"Siguiente evento de la misma memoria: «{nxt[0].name}» ({len(nxt[1]):,} fotos)")
+            self.status.setText(f"Sigue el evento {self._event_total - len(queue)} de {self._event_total}: "
+                                f"«{nxt[0].name}»…")
+            QTimer.singleShot(1500, lambda: self._run(nxt[0], nxt[1], nxt[2], 0, copy_roots=nxt[3]))
 
     # ------------------------------------------------------------ otros
     def _show_permissions(self):
@@ -2253,6 +2433,7 @@ def main():
     tint_titlebar(win)                      # Windows 11: la barra de título, del color de la ventana
     win.showMaximized()                     # grande, ocupando la pantalla
     win.start_update_check()                # ¿hay versión nueva en GitHub? (en segundo plano)
+    QTimer.singleShot(6000, win.offer_telemetry_off)   # Windows: telemetrías fuera (una vez por equipo)
     anim.fade_in_window(win)
     code = app.exec()
     win.shutdown()

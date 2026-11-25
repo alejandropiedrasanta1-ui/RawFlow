@@ -352,7 +352,7 @@ def funciona_en_windows():
         finally:
             subprocess.run = real
         from rawflow import timing
-        assert len(timing.Estimator().estimate(10, 10 * 50_000_000)) == 6
+        assert len(timing.Estimator().estimate(10, 10 * 50_000_000)) == 7
     finally:
         core.SYSTEM = old
         importlib.reload(P)
@@ -447,6 +447,108 @@ def seleccion_fallida_desenfocada():
     d = S.decide(rows)
     assert set(d) == {"F0005.ARW"} and "desenfocada" in d["F0005.ARW"], d
     assert S.decide(rows[:15]) == {}, "con menos de 20 fotos no hay mediana: no se aplica"
+
+
+@caso
+def memoria_con_dos_eventos():
+    """Una memoria con dos eventos (boda el sábado, XV el domingo; o dos el mismo día con horas de diferencia) se
+    separa por los huecos entre tomas; un evento largo con pausas de hasta 3 h sigue siendo UNO; un grupito de pruebas
+    de cámara no es un evento; dos cámaras del mismo evento se juntan."""
+    H = 3600.0
+    t0 = 1_800_000_000.0
+
+    def fotos(cam, start, n, step=30.0):
+        return [core.RawFile(f"/m/{cam}{i:04d}.ARW", 1, start + i * step, "m") for i in range(n)]
+    when = lambda f: f.mtime                                                   # noqa: E731
+    boda = fotos("A", t0, 300) + fotos("A", t0 + 300 * 30 + 3 * H, 200)        # pausa de 3 h: misma boda
+    xv = fotos("A", t0 + 30 * H, 250)                                          # al día siguiente
+    g = core.split_events(boda + xv, when=when)
+    assert [len(x) for x in g] == [500, 250], [len(x) for x in g]
+    pruebas = fotos("A", t0 - 10 * H, 5)                                       # pruebas de cámara la víspera
+    assert [len(x) for x in core.split_events(pruebas + boda, when=when)] == [505]
+    cam_b = fotos("B", t0 + 15, 280, step=31.0)                                # otra cámara, el mismo evento
+    assert [len(x) for x in core.split_events(boda + cam_b + xv, when=when)] == [780, 250]
+    assert core.split_events([], when=when) == []
+    tarde = fotos("A", t0 + 300 * 30 + 5 * H, 120)                            # 5 h después, el mismo día: DUDOSO
+    assert [len(x) for x in core.split_events(fotos("A", t0, 300) + tarde, when=when)] == [420]    # sin respuesta: uno
+    assert [len(x) for x in core.split_events(fotos("A", t0, 300) + tarde, when=when,
+                                              doubtful=lambda a, b, s: True)] == [300, 120]        # «son dos»
+    dud = core.doubtful_gaps(fotos("A", t0, 300) + tarde + xv, when=when)
+    assert [(len(a), len(b), round(s / H)) for a, b, s in dud] == [(300, 120, 5)], dud   # el de 30 h no se pregunta
+    # la GENTE manda: la misma gente tras la noche = un evento (boda en dos días); otra gente el mismo día = dos
+    misma = lambda a, b: 0.6                                                              # noqa: E731
+    otra = lambda a, b: 0.0                                                               # noqa: E731
+    assert [len(x) for x in core.split_events(boda + xv, when=when, people=misma)] == [750]
+    assert [len(x) for x in core.split_events(fotos("A", t0, 300) + tarde, when=when, people=otra)] == [300, 120]
+    assert [len(x) for x in core.split_events(boda + xv, when=when, people=lambda a, b: None)] == [500, 250]
+    assert [len(x) for x in core.split_in_two(fotos("A", t0, 100) + fotos("A", t0 + 100 * 30 + 2 * H, 60),
+                                              when=when)] == [100, 60]      # el botón: por el hueco más largo
+    assert [len(x) for x in core.split_in_two(fotos("A", t0, 30), when=when)] == [30]   # muy pocas: no se parte
+
+
+@caso
+def cerrar_apps_windows():
+    """Al empezar un evento en Windows: cada app con ventana se cierra como su X; la que se queda en segundo plano sin
+    ventana (Claude, Chrome…) se termina con sus subprocesos; la que sigue con ventana (pregunta si guardar) se FUERZA
+    (decisión del usuario); Windows (explorer…), los ventiladores (FanControl, aunque tenga ventana), RawFlow y
+    RAWFLOW_NO_CERRAR no se tocan. Todo simulado: no cierra nada real."""
+    if sys.platform != "win32":                       # (cierre de apps de Windows: en el Mac lo hace osascript)
+        return
+    from rawflow import pipeline as pl, winscreen as ws
+    import psutil
+    vivos = {10: "Resolve.exe", 11: "claude.exe", 12: "claude.exe", 13: "Editor.exe", 14: "explorer.exe",
+             15: "Protegida.exe", 16: "FanControl.exe"}
+    con_ventana = {10, 11, 13, 14, 15, 16}
+    hijos = {11: [12]}
+    quiere_cerrar = {10: "sale", 11: "se esconde", 13: "pregunta"}
+    terminados, cerradas_x = [], []
+
+    def windows(title_part="", exe=""):
+        return [{"hwnd": 1000 + p, "title": vivos[p], "pid": p, "exe": vivos[p], "rect": (0, 0, 800, 600), "min": False}
+                for p in sorted(con_ventana) if p in vivos]
+
+    def close_window(h):
+        p = h - 1000
+        cerradas_x.append(vivos[p])
+        if quiere_cerrar.get(p) == "sale":
+            vivos.pop(p)
+        elif quiere_cerrar.get(p) == "se esconde":
+            con_ventana.discard(p)
+
+    class P:
+        def __init__(self, pid=None):
+            self.pid = pid if pid is not None else 1
+            if pid is not None and pid not in vivos:
+                raise psutil.NoSuchProcess(pid)
+
+        def parent(self):
+            return None
+
+        def is_running(self):
+            return self.pid in vivos
+
+        def children(self, recursive=False):
+            return [P(c) for c in hijos.get(self.pid, [])]
+
+        def terminate(self):
+            terminados.append(vivos.pop(self.pid, "?"))
+
+        kill = terminate
+    orig = (ws.windows, ws.close_window, psutil.Process, psutil.wait_procs, pl.background_sweep, pl._own_tree)
+    ws.windows, ws.close_window, psutil.Process = windows, close_window, P
+    psutil.wait_procs = lambda procs, timeout=0: ([], [])
+    barrido = []
+    pl.background_sweep = lambda log, keep, prot=(): barrido.append(1) or ["fondo"]
+    pl._own_tree = lambda: {1}
+    try:
+        r = pl.quit_other_apps_windows(lambda m: None, wait=1, keep_extra=["Protegida.exe"])
+    finally:
+        ws.windows, ws.close_window, psutil.Process, psutil.wait_procs, pl.background_sweep, pl._own_tree = orig
+    assert sorted(cerradas_x) == ["Editor.exe", "Resolve.exe", "claude.exe"], cerradas_x   # ni explorer, ni protegida,
+    assert r == {"cerradas": ["Resolve.exe", "claude.exe"], "forzadas": ["Editor.exe"], "fondo": ["fondo"]}, r
+    assert barrido, "después, todo lo de segundo plano"                                     # ni FanControl
+    assert sorted(terminados) == ["Editor.exe", "claude.exe", "claude.exe"], terminados    # forzada; Claude + hijo
+    assert 14 in vivos and 15 in vivos and 16 in vivos                                      # Windows/protegida/ventiladores
 
 
 @caso

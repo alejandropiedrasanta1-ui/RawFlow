@@ -31,7 +31,8 @@ if (-not (Test-Path $vpy)) { throw "Falta Python $pyv (https://www.python.org/do
 if ($LASTEXITCODE -ne 0) { throw 'pip no pudo instalar las librerías' }
 & $vpy -c "import PySide6, psutil, PyInstaller, cv2, numpy; print('    PySide6', PySide6.__version__, '· psutil', psutil.__version__, '· PyInstaller', PyInstaller.__version__, '· OpenCV', cv2.__version__, '· numpy', numpy.__version__)"
 if ($LASTEXITCODE -ne 0) { throw 'Falta alguna librería (PySide6, psutil, PyInstaller, OpenCV o numpy)' }
-foreach ($m in 'face_detection_yunet_2023mar.onnx', 'face_landmarker.task', 'mobilenet_v3_large.tflite') {
+foreach ($m in 'face_detection_yunet_2023mar.onnx', 'face_landmarker.task', 'mobilenet_v3_large.tflite',
+              'face_recognition_sface_2021dec_int8.onnx') {
     if (-not (Test-Path "rawflow\modelos\$m")) { throw "Falta el modelo de la Selección IA: rawflow\modelos\$m (ver rawflow\modelos\LEEME.txt)" }
 }
 

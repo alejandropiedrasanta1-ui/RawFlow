@@ -38,10 +38,11 @@ RAW_DIR = core.RAW_SUBFOLDER          # "1 Original"
 DNG_DIR = core.OUTPUT_SUBFOLDER       # "2 DNGs"
 IMAGEN_DIR = core.IMAGEN_SUBFOLDER    # «3 Imagen AI» (en la carpeta del evento, desde 4.15)
 JPEG_SIN_DIR = core.JPEG_SIN_SUBFOLDER  # «3 JPEG sin Imagen», si Imagen está DESACTIVADO (doble clic en su paso)
-from .core import STEP_DXO, STEP_FINAL, STEP_IMG, STEP_MOVE, STEP_PRES, STEP_RET, STEP_SEL  # noqa: E402
-TOGGLEABLE = (STEP_SEL, STEP_IMG, STEP_RET, STEP_PRES)   # se activan/desactivan con doble clic (Mover y DxO, siempre)
+from .core import STEP_DXO, STEP_FINAL, STEP_IMG, STEP_LUM, STEP_MOVE, STEP_PRES, STEP_RET, STEP_SEL  # noqa: E402
+TOGGLEABLE = (STEP_SEL, STEP_IMG, STEP_RET, STEP_LUM, STEP_PRES)   # con doble clic (Mover y DxO, siempre)
 FINAL_DIR = core.FINAL_SUBFOLDER      # «4 Fotos finales»
-PRES_DIR = core.PRES_SUBFOLDER        # «5 Presentación de fotos»
+LUM_DIR = core.LUMINAR_SUBFOLDER      # «5 Fotos finales Luminar»
+PRES_DIR = core.PRES_SUBFOLDER        # «6 Presentación de fotos»
 CINESLIDE_DIR = Path.home() / "Library/Application Support/CineSlide"
 PRES_THEME = "4"                      # Tema 4 · Montón de fotos
 
@@ -51,8 +52,18 @@ STEPS = [                              # (paso, la carpeta donde deja lo suyo), 
     ("DxO", "→ DNGs"),
     ("Imagen AI", "→ Imagen AI"),
     ("Retouch4me", "→ Fotos finales"),
+    ("Luminar", "→ Finales Luminar"),
     ("CineSlide", "→ Presentación"),
 ]
+
+
+def deliver_dir(ev: Path, off=()) -> Path:
+    """Las fotos que se entregan y con las que se hace la presentación: las de Luminar si ese paso está activo y ya
+    exportó; si no, las de Retouch4me («4 Fotos finales»)."""
+    lum = Path(ev) / LUM_DIR
+    if STEP_LUM not in set(off) and lum.is_dir() and any(lum.glob("*.jp*g")):
+        return lum
+    return Path(ev) / FINAL_DIR
 
 
 def presentation_current(out: Path, final: Path) -> bool:
@@ -99,7 +110,13 @@ def resume_step(ev: Path, off=()):
     n_fin = len([q for q in final.glob("*.jp*g") if not q.name.startswith(".")]) if final.is_dir() else 0
     if n_fin < len(core.jpg_stems(img)):
         return STEP_RET, "fotos finales"
-    if STEP_PRES not in off and not presentation_current(ev / PRES_DIR, final):
+    if STEP_LUM not in off:
+        from . import luminar_win
+        lum = ev / LUM_DIR
+        n_lum = len([q for q in lum.glob("*.jp*g") if not q.name.startswith(".")]) if lum.is_dir() else 0
+        if luminar_win.available()[0] and n_lum < n_fin:
+            return STEP_LUM, "las fotos de Luminar"
+    if STEP_PRES not in off and not presentation_current(ev / PRES_DIR, deliver_dir(ev, off)):
         return STEP_PRES, "la presentación"
     return STEP_IMG, ""
 
@@ -140,9 +157,14 @@ def quit_other_apps(log=lambda s: None, wait: float = 12.0):
     import os
     import subprocess
     from concurrent.futures.thread import ThreadPoolExecutor   # directo: en Python 3.15 el otro es perezoso y falla
+    if os.environ.get("RAWFLOW_SIN_APPS") == "1":       # pruebas: nunca se cierra nada de verdad
+        return
+    if core.SYSTEM == "Windows":
+        quit_other_apps_windows(log, wait)
+        return
     if core.SYSTEM != "Darwin":
         return
-    keep = _KEEP | {x.strip() for x in os.environ.get("RAWFLOW_NO_CERRAR", "").split(",") if x.strip()}
+    keep = _KEEP |{x.strip() for x in os.environ.get("RAWFLOW_NO_CERRAR", "").split(",") if x.strip()}
     try:                                                 # ventanas del Finder: fuera también
         subprocess.run(["osascript", "-e", 'tell application "Finder" to close every window'],
                        capture_output=True, timeout=10)
@@ -185,7 +207,179 @@ def quit_other_apps(log=lambda s: None, wait: float = 12.0):
     kill_orphan_helpers()                            # y los ayudantes que quedaron huérfanos de otra vez
 
 
-LAUNCH_CLOSE = ("UTM", "ImagenAI", "Retouch4me Arams", "PureRAWv6", "DxO PureRAW 6", "CineSlide")
+# Windows: lo que es parte de Windows (escritorio, barra de tareas, menú Inicio, búsqueda, teclado en pantalla…) no
+# se cierra nunca; tampoco RawFlow ni el programa desde el que se abrió (si RawFlow se abre desde una terminal,
+# cerrarla lo cerraría a él). Todo lo demás con ventana, sí (pedido del usuario: «que quede camino libre»).
+_KEEP_WIN = {"explorer.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "searchhost.exe",
+             "searchapp.exe", "textinputhost.exe", "lockapp.exe", "applicationframehost.exe", "systemsettings.exe",
+             "rawflow.exe", "securityhealthsystray.exe", "ctfmon.exe", "dwm.exe", "taskmgr.exe"}
+# En segundo plano se cierra TODO lo que no es de Windows (Adobe, telemetrías de programas, actualizadores, Claude,
+# servidores locales…), salvo lo que cuida el equipo: el control de ventiladores y bombas (sin él, con la tarjeta al
+# 100 % durante horas, el equipo podría calentarse) y el antivirus.
+_KEEP_BG_WORDS = ("fancontrol", "fan control", "speedfan", "argus", "icue", "nzxt", "liquidctl", "aquasuite",
+                  "defender", "securityhealth", "antivirus", "avast", "avg", "eset", "kaspersky", "norton", "mcafee",
+                  "bitdefender", "malwarebytes", "sophos", "trend micro")
+
+
+def windows_apps_to_close(keep_extra=()) -> dict:
+    """{pid: (programa, [ventanas])} de las apps con ventana que se cerrarían (sin cerrar nada)."""
+    from . import winscreen as ws
+    keep = _KEEP_WIN | {x.lower() for x in keep_extra}
+    mine = _own_tree()                               # RawFlow y quien lo abrió (terminal, Claude Code…)
+    apps: dict = {}
+    for w in ws.windows():
+        exe = (w.get("exe") or "").lower()
+        if not exe or exe in keep or w["pid"] in mine or any(k in exe for k in _KEEP_BG_WORDS):
+            continue                                 # (ventiladores y antivirus, aunque tengan ventana: nunca)
+        x, y, ww, hh = w["rect"]
+        if ww < 50 or hh < 30:                       # ventanitas ocultas de servicio
+            continue
+        apps.setdefault(w["pid"], (w["exe"], []))[1].append(w["hwnd"])
+    return apps
+
+
+def _kill_tree(p) -> None:
+    """Termina un proceso y todos sus subprocesos (si en 5 s no salen, a la fuerza)."""
+    import psutil
+    try:
+        tree = p.children(recursive=True) + [p]
+    except psutil.Error:
+        return
+    for q in tree:
+        try:
+            q.terminate()
+        except psutil.Error:
+            pass
+    _, alive = psutil.wait_procs(tree, timeout=5)
+    for q in alive:
+        try:
+            q.kill()
+        except psutil.Error:
+            pass
+
+
+def quit_other_apps_windows(log=lambda s: None, wait: float = 12.0, keep_extra=None) -> dict:
+    """Windows: cierra TODAS las apps con ventana (primero como su X, para que las que pueden guarden solas) y luego
+    termina, con sus subprocesos, las que se quedan en segundo plano o en la bandeja (Claude, Chrome, Steam…) y las
+    que siguen abiertas preguntando algo («¿guardar?»): esas se FUERZAN y lo que no estuviera guardado se pierde
+    (decisión del usuario, 24-nov-2026: «que cierre todo sin excepciones»). Después, todo lo de segundo plano
+    (background_sweep). Devuelve {"cerradas": [...], "forzadas": [...], "fondo": [...]}."""
+    import os
+    import psutil
+    from . import winscreen as ws
+    if keep_extra is None:
+        keep_extra = [x.strip() for x in os.environ.get("RAWFLOW_NO_CERRAR", "").split(",") if x.strip()]
+        keep_extra = [x if x.lower().endswith(".exe") else x + ".exe" for x in keep_extra]
+    apps = windows_apps_to_close(keep_extra)
+    if not apps:                                     # ninguna con ventana: igualmente, todo lo de segundo plano
+        return {"cerradas": [], "forzadas": [], "fondo": background_sweep(log, keep_extra)}
+    names = sorted({exe[:-4] if exe.lower().endswith(".exe") else exe for exe, _ in apps.values()}, key=str.lower)
+    log(f"Cerrando {len(names)} apps para que RawFlow tenga el equipo libre: {', '.join(names)}")
+    procs = {}
+    for pid in apps:
+        try:
+            procs[pid] = psutil.Process(pid)
+        except psutil.Error:
+            pass
+    for pid, (_, hwnds) in apps.items():
+        for h in hwnds:
+            ws.close_window(h)
+    t0 = time.time()
+    while time.time() - t0 < wait:                   # esperar a que salgan o escondan su ventana
+        vivas = {w["pid"] for w in ws.windows()}
+        if not any(p.is_running() and pid in vivas for pid, p in procs.items()):
+            break
+        time.sleep(0.5)
+    vivas = {w["pid"] for w in ws.windows()}
+    forzadas, cerradas = set(), set()
+    for pid, p in procs.items():
+        exe = apps[pid][0]
+        try:
+            if not p.is_running():
+                cerradas.add(exe)
+                continue
+            (forzadas if pid in vivas else cerradas).add(exe)   # con ventana todavía = preguntaba algo
+            _kill_tree(p)
+        except psutil.Error:
+            cerradas.add(exe)
+    if forzadas:
+        log(f"Cerradas a la fuerza (preguntaban algo, p. ej. si guardar; lo no guardado se pierde): "
+            f"{', '.join(sorted(forzadas))}")
+    fondo = background_sweep(log, keep_extra)
+    return {"cerradas": sorted(cerradas - forzadas), "forzadas": sorted(forzadas), "fondo": fondo}
+
+
+def _own_tree() -> set:
+    """PIDs de RawFlow, de los procesos que lo abrieron (terminal, Claude Code…) y de los que RawFlow lanzó."""
+    import psutil
+    out = set()
+    try:
+        me = psutil.Process()
+        out |= {c.pid for c in me.children(recursive=True)}
+        p = me
+        while p is not None:
+            out.add(p.pid)
+            p = p.parent()
+    except psutil.Error:
+        pass
+    return out
+
+
+def background_sweep(log=lambda s: None, keep_extra=(), protected=(), filtro=None) -> List[str]:
+    """Termina (con sus subprocesos) todo lo que sigue corriendo en segundo plano de este usuario y NO es de Windows:
+    Adobe (Creative Cloud, CoreSync, IPCBroker…), telemetrías y actualizadores de programas, Claude, Ollama, docks…
+    Nunca: lo que está en la carpeta de Windows, `protected`, `_KEEP_WIN`, los ventiladores/antivirus
+    (`_KEEP_BG_WORDS`) ni `keep_extra`. `filtro(proc)` (pruebas) limita a qué procesos se aplica.
+    Devuelve los nombres que cerró."""
+    import os
+    import psutil
+    sysroot = (os.environ.get("SystemRoot") or r"C:\Windows").lower().rstrip("\\") + "\\"
+    keep = _KEEP_WIN | {x.lower() for x in keep_extra}
+    protected = set(protected) | _own_tree()
+    try:
+        me = psutil.Process().username()
+    except psutil.Error:
+        return []
+    targets = []
+    for p in psutil.process_iter(["pid", "name", "exe", "username"]):
+        try:
+            name, exe = (p.info["name"] or ""), (p.info["exe"] or "")
+            low = (name + " " + exe).lower()
+            if (p.info["username"] != me or not exe or exe.lower().startswith(sysroot) or p.pid in protected
+                    or name.lower() in keep or any(w in low for w in _KEEP_BG_WORDS)):
+                continue
+            if filtro is not None and not filtro(p):
+                continue
+            targets.append(p)
+        except psutil.Error:
+            continue
+    if not targets:
+        return []
+    ram = 0
+    for p in targets:
+        try:
+            ram += p.memory_info().rss
+            p.terminate()
+        except psutil.Error:
+            pass
+    _, alive = psutil.wait_procs(targets, timeout=4)
+    for p in alive:
+        try:
+            p.kill()
+        except psutil.Error:
+            pass
+    _, alive = psutil.wait_procs(alive, timeout=2)
+    names = sorted({(p.info.get("name") or "?") for p in targets if p not in alive}, key=str.lower)
+    if names:
+        log(f"Cerrados {len(targets) - len(alive)} procesos en segundo plano (≈{ram / 2**30:.1f} GB de RAM): "
+            + ", ".join(n[:-4] if n.lower().endswith(".exe") else n for n in names))
+    if alive:
+        log(f"No se pudieron cerrar (protegidos por Windows o como administrador): "
+            + ", ".join(sorted({p.info.get('name') or '?' for p in alive})))
+    return names
+
+
+LAUNCH_CLOSE = ("UTM","ImagenAI", "Retouch4me Arams", "PureRAWv6", "DxO PureRAW 6", "CineSlide")
 
 
 def close_on_launch(log=lambda s: None, running=None, quit_=None, stop=None) -> list:
@@ -463,7 +657,7 @@ class Pipeline(QThread):
                 self.detail.emit("Carpetas en el orden de los pasos: " + ", ".join(movidas))
             import os
             stop_after = int(os.environ.get("RAWFLOW_PARAR_TRAS", "0") or 0)   # solo para pruebas
-            steps = (self._move, self._select, self._dxo, self._imagen, self._retouch, self._present)
+            steps = (self._move, self._select, self._dxo, self._imagen, self._retouch, self._luminar, self._present)
             for k in range(self.start_at):
                 self.step.emit(k, "done")
                 self._verify_step(k, "done")       # lo de antes también se comprueba (y se ve)
@@ -477,7 +671,7 @@ class Pipeline(QThread):
                 if i >= 1 and self._quitter is not None:   # el cierre de apps tiene que haber acabado
                     self._quitter.join(20)
                     self._quitter = None
-                live.clear("mover", "dxo", "imagen", "bridge", "ret", "pres")   # la subida puede seguir entre pasos
+                live.clear("mover", "dxo", "imagen", "bridge", "ret", "lum", "pres")   # la subida sigue entre pasos
                 self.step.emit(i, "run")
                 self.progress.emit(0.0)
                 try:
@@ -515,7 +709,7 @@ class Pipeline(QThread):
             self.finished_all.emit(str(self.ev_dir), str(e))
 
     # ---- reparación automática
-    RETRIES = {STEP_DXO: 3, STEP_IMG: 4, STEP_RET: 4, STEP_PRES: 3}   # pasos que manejan otras apps: se reintentan solos
+    RETRIES = {STEP_DXO: 3, STEP_IMG: 4, STEP_RET: 4, STEP_LUM: 3, STEP_PRES: 3}   # manejan otras apps: se reintentan
 
     def _f(self):
         """Carpetas de ESTE evento (los JPEG del paso 3 van a «JPEG sin Imagen» si Imagen está desactivado)."""
@@ -606,9 +800,14 @@ class Pipeline(QThread):
                                f"({', '.join(p.stem for p in falta[:5])}): Retouch4me falló con ellas ({why}).")
                 self.summary["final"] = len(src)
                 return "done"
+            if i == STEP_LUM:                                  # Luminar: las finales de Retouch4me siguen valiendo
+                self._warn(f"Luminar no pudo aplicar «CINEMA AJUSTE» ({why}). Las fotos finales de Retouch4me están "
+                           f"completas en «{FINAL_DIR}»; se puede rehacer con «Reintentar desde el paso {STEP_LUM + 1}».")
+                self.summary["sin_luminar"] = True
+                return "done"
             if i == STEP_PRES:                                 # CineSlide: las fotos ya están; la presentación no
                 self._warn(f"La presentación no se pudo crear ({why}). Las fotos finales están completas; "
-                           "se puede rehacer con «Reintentar desde el paso 5».")
+                           f"se puede rehacer con «Reintentar desde el paso {STEP_PRES + 1}».")
                 self.summary["sin_presentacion"] = True
                 return "done"
         except Exception as e2:  # noqa: BLE001
@@ -634,6 +833,13 @@ class Pipeline(QThread):
                         imagen_win.close_app(imagen_win.EXE)
                 except Exception:  # noqa: BLE001
                     pass
+            elif i == STEP_LUM:                      # Luminar: cerrarlo para reintentar limpio
+                try:
+                    from . import imagen_win, luminar_win
+                    if not imagen_win.no_apps():
+                        imagen_win.close_app(luminar_win.EXE, wait=20)
+                except Exception:  # noqa: BLE001
+                    pass
             return
         if core.SYSTEM != "Darwin":
             return
@@ -652,14 +858,48 @@ class Pipeline(QThread):
         for n in ("Problem Reporter", "ReportCrash"):       # «se cerró inesperadamente» tapa la app al reintentar
             subprocess.run(["pkill", "-x", n], capture_output=True)
 
-    # ---- 6
+    # ---- 6 Luminar
+    def _luminar(self):
+        """Luminar Neo (Windows): catálogo nuevo del evento, «CINEMA AJUSTE» a todas las fotos finales y exportación
+        JPEG al 100 % → <evento>/5 Fotos finales Luminar (mismos nombres: 1.jpg, 2.jpg…). Ver luminar_win."""
+        if STEP_LUM in self.off:
+            self.detail.emit("Luminar desactivado: las fotos finales son las de Retouch4me.")
+            return "off"
+        _, _, _, final = self._f()
+        src = sorted(p for p in final.glob("*.jp*g") if not p.name.startswith(".")) if final.is_dir() else []
+        if not src:
+            self.detail.emit("No hay fotos finales para Luminar: paso omitido.")
+            return "skip"
+        from . import luminar_win
+        ok, why = luminar_win.available()
+        if not ok:
+            self.detail.emit(f"Luminar no disponible en este equipo ({why}): paso omitido.")
+            return "skip"
+        out = self.ev_dir / LUM_DIR
+        hechas = {p.stem.lower() for p in out.glob("*.jp*g")} if out.is_dir() else set()
+        if src and all(p.stem.lower() in hechas for p in src) and min(
+                (q.stat().st_mtime for q in out.glob("*.jp*g")), default=0) >= max(p.stat().st_mtime for p in src) - 60:
+            self.detail.emit("Las fotos de Luminar ya estaban hechas.")
+            return "done"
+        self.work[STEP_LUM] = (len(src), _bytes(src))
+        self.progress.emit(-1)
+        self.status.emit(f"Luminar aplicando «{luminar_win.PRESET}» a {len(src):,} fotos…")
+        n = luminar_win.run(self.ev_dir, final, out, self.detail.emit, should_stop=self.stopped,
+                            progress=self.progress.emit)
+        if n < len(src):
+            raise RuntimeError(f"Luminar exportó {n} de {len(src)} fotos.")
+        self.summary["luminar"] = n
+        return "done"
+
+    # ---- 7
     def _present(self):
-        """CineSlide (tema 4) con las fotos finales → <evento>/5 Presentación de fotos/Presentación.mp4."""
+        """CineSlide (tema 4) con las fotos finales (las de Luminar si ese paso está activo) →
+        <evento>/6 Presentación de fotos/Presentación.mp4."""
         import subprocess
         if STEP_PRES in self.off:
             self.detail.emit("CineSlide desactivado: este evento va sin presentación.")
             return "off"
-        _, _, _, final = self._f()
+        final = deliver_dir(self.ev_dir, self.off)
         out = self.ev_dir / PRES_DIR
         from . import programas                       # Mac: ~/Library/Application Support/CineSlide;
         py = programas.cineslide_python()             # Windows: C:\Program Files (x86)\CineSlide (su propio Python)
@@ -968,9 +1208,21 @@ class Pipeline(QThread):
                     ok = len(fin) >= len(jpgs)
                     res = ("ok" if ok else "warn", f"{len(fin):,} retocadas · numeradas del 1 al {len(fin):,}",
                            f"{len(fin):,} retocadas")
+            elif i == STEP_LUM:
+                lum = self.ev_dir / LUM_DIR
+                n_lum = len([q for q in lum.glob("*.jp*g") if not q.name.startswith(".")]) if lum.is_dir() else 0
+                if STEP_LUM in self.off:
+                    res = ("off", "desactivado · se entregan las de Retouch4me", "sin Luminar")
+                elif state == "skip" and not n_lum:
+                    res = ("off", "omitido en este equipo", "omitido")
+                else:
+                    ok = n_lum >= len(fin)
+                    res = ("ok" if ok else "warn", f"{n_lum:,} de {len(fin):,} con «CINEMA AJUSTE» en «{LUM_DIR}»",
+                           f"{n_lum:,} con Luminar" if ok else f"{n_lum:,} de {len(fin):,}")
             elif i == STEP_PRES:
                 out = self.ev_dir / PRES_DIR
                 vids = sorted(out.glob("*.mp4")) if out.is_dir() else []
+                final = deliver_dir(self.ev_dir, self.off)
                 if STEP_PRES in self.off:
                     res = ("off", "desactivado · sin presentación", "sin video")
                 elif vids and presentation_current(out, final):

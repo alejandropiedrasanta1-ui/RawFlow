@@ -273,6 +273,23 @@ Enchufado y con el Mac fresco (base con ventilador, superficie dura, tapa abiert
 Si el preajuste usa algo que el motor directo no reproduce igual (máscaras, búsqueda de caras, ajustes por
 género, LUT, plugins demo o no instalados), RawFlow usa la ventana de Arams como antes (`arams_ui.py`).
 
+## Luminar: paso 6 (Windows, 4.23)
+
+Después de Retouch4me, Luminar Neo da el toque final con tu preajuste **«CINEMA AJUSTE»** (Mis preajustes), como en
+el video «PASO 5 LUMINAR»:
+
+1. catálogo **nuevo** para el evento en `Imágenes\Catálogos Luminar RawFlow\<evento>` (nunca se mezclan eventos);
+2. añade la carpeta **«4 Fotos finales»**;
+3. aplica «CINEMA AJUSTE» a una foto, **Copiar ajustes** y **Pegar ajustes** a todas;
+4. exporta en **JPEG al 100 %** a **«5 Fotos finales Luminar»** (mismos nombres: 1.jpg, 2.jpg…);
+5. comprueba que **cada foto cambió** respecto a la de Retouch4me (si el ajuste no se pegó, reintenta) y cierra Luminar.
+
+CineSlide hace la presentación con esas fotos (carpeta **«6 Presentación de fotos»**; los eventos de antes con
+«5 Presentación de fotos» se renombran solos). Si Luminar falla del todo, el evento termina igual, con aviso, y se
+entregan las de Retouch4me. Se desactiva con doble clic en su paso, como los demás. Luminar se maneja leyendo la
+pantalla (no tiene línea de comandos): mientras trabaja, mejor no tocar el ratón (RawFlow ya cierra las demás apps).
+Medido: 5 fotos en ≈80 s (abrir Luminar y el catálogo ≈60 s; exportar ≈3 s por foto).
+
 ## DxO: procesado automático con CINEMA
 Con la casilla **«Procesar con CINEMA»** marcada, al terminar de mover RawFlow
 manda todas las fotos a **DxO PureRAW** y las procesa **solas** con tu preajuste
