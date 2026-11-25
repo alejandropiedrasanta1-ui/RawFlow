@@ -2237,13 +2237,19 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             pass
         self._update_summary()
+        self._next_event(err)
+
+    def _next_event(self, err: str = "", delay_ms: int = 1500) -> bool:
+        """La memoria traía varios eventos: al terminar uno bien, el siguiente (en SU carpeta). True si arrancó otro."""
         queue = getattr(self, "_event_queue", None)
-        if queue and not err:                  # la memoria traía varios eventos: el siguiente, en SU carpeta
-            nxt = queue.pop(0)
-            self._log(f"Siguiente evento de la misma memoria: «{nxt[0].name}» ({len(nxt[1]):,} fotos)")
-            self.status.setText(f"Sigue el evento {self._event_total - len(queue)} de {self._event_total}: "
-                                f"«{nxt[0].name}»…")
-            QTimer.singleShot(1500, lambda: self._run(nxt[0], nxt[1], nxt[2], 0, copy_roots=nxt[3]))
+        if not queue or err:
+            return False
+        nxt = queue.pop(0)
+        self._log(f"Siguiente evento de la misma memoria: «{nxt[0].name}» ({len(nxt[1]):,} fotos)")
+        self.status.setText(f"Sigue el evento {self._event_total - len(queue)} de {self._event_total}: "
+                            f"«{nxt[0].name}»…")
+        QTimer.singleShot(delay_ms, lambda: self._run(nxt[0], nxt[1], nxt[2], 0, copy_roots=nxt[3]))
+        return True
 
     # ------------------------------------------------------------ otros
     def _show_permissions(self):

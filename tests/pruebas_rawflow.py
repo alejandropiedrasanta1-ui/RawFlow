@@ -1499,9 +1499,8 @@ def p67():
         assert [len(g) for g in w._event_groups(files)] == [30, 25]
         w._start()
         assert corridas == [("Fin de semana - Evento 1", 30, [])], corridas      # el primero, sin expulsar
-        ev1 = base / "Escritorio" / "Fin de semana - Evento 1"
-        ev1.mkdir(parents=True)
-        w._after_finish(str(ev1), "", {})
+        assert not w._next_event("Cancelado.", 0) and len(corridas) == 1       # si el primero falla, no sigue
+        assert w._next_event("", 0)                                           # (lo que hace _after_finish al acabar)
         deadline = time.monotonic() + 5
         while len(corridas) < 2 and time.monotonic() < deadline:
             app.processEvents()
@@ -1883,15 +1882,15 @@ def p65():
 
 def main() -> int:
     ok = saltadas = 0
-    print(f"PRUEBAS DE RAWFLOW ({len(PRUEBAS)} casos)\n")
+    print(f"PRUEBAS DE RAWFLOW ({len(PRUEBAS)} casos)\n", flush=True)
     for n, (titulo, fn) in enumerate(PRUEBAS, 1):
         t0 = time.monotonic()
         try:
             fn()
-            print(f"  ✓ Prueba {n:>2}: {titulo}  ({time.monotonic() - t0:.1f} s)")
+            print(f"  ✓ Prueba {n:>2}: {titulo}  ({time.monotonic() - t0:.1f} s)", flush=True)
             ok += 1
         except Saltada as s:
-            print(f"  – Prueba {n:>2}: {titulo}  [saltada: {s}]")
+            print(f"  – Prueba {n:>2}: {titulo}  [saltada: {s}]", flush=True)
             saltadas += 1
         except Exception:  # noqa: BLE001
             print(f"  ✗ Prueba {n:>2}: {titulo}", flush=True)

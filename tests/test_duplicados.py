@@ -1221,7 +1221,7 @@ def main() -> int:
     for fn in RESULTS:
         try:
             fn()
-            print(f"  ✓ {fn.__name__}")
+            print(f"  ✓ {fn.__name__}", flush=True)
             ok += 1
         except Exception:  # noqa: BLE001
             print(f"  ✗ {fn.__name__}")
