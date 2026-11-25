@@ -157,10 +157,9 @@ def quit_other_apps(log=lambda s: None, wait: float = 12.0):
     import os
     import subprocess
     from concurrent.futures.thread import ThreadPoolExecutor   # directo: en Python 3.15 el otro es perezoso y falla
-    if os.environ.get("RAWFLOW_SIN_APPS") == "1":       # pruebas: nunca se cierra nada de verdad
-        return
     if core.SYSTEM == "Windows":
-        quit_other_apps_windows(log, wait)
+        if os.environ.get("RAWFLOW_SIN_APPS") != "1":   # pruebas: en Windows nunca se cierra nada de verdad (en el Mac
+            quit_other_apps_windows(log, wait)          # las pruebas simulan osascript y sí lo recorren)
         return
     if core.SYSTEM != "Darwin":
         return
