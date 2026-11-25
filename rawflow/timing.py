@@ -25,7 +25,14 @@ SEED: Dict[str, Tuple[float, float]] = {        # fase: (segundos fijos, segundo
     "lum": (60.0, 1.5),                          # Luminar Neo: abrir + catálogo + preajuste + exportar (se aprende)
     "pres": (7.0, 2.5),                          # CineSlide tema 4
 }
-MOVE_BPS = 90e6                                   # lectura típica de tarjeta por USB (se aprende)
+import sys as _sys
+if _sys.platform == "win32":                    # (4.24) Windows tenía las del Mac: 612 fotos salían ≈14 h 30 y eran ≈5 h.
+    SEED.update({                               # Medido en el PC (i5-12400 + RTX 5070 Ti, 24-nov-2026, NEF):
+        "dxo": (4.0, 4.0),                      # 8 fotos ≈33 s
+        "bridge": (12.0, 2.5),                  # 8 JPEG ≈28-32 s (con abrir Bridge)
+        "ret": (20.0, 16.5),                    # 3 motores a la vez: 16,4 s por foto
+    })
+MOVE_BPS = 90e6                                  # lectura típica de tarjeta por USB (se aprende)
 UPLOAD_BPS = 15e6                                 # subida a Imagen (se aprende de cada subida real)
 DNG_PER_RAW = 1.75                                # un DNG de DxO pesa ~1,75× el RAW
 
@@ -83,7 +90,9 @@ def model(phase: str, hist=None) -> Tuple[float, float, int]:
     if n >= 20:
         spp = max(0.05, (avg - fixed0) / n)
         return fixed0, spp, len(pts)
-    fixed = max(0.0, avg - spp0 * n)
+    fixed = avg - spp0 * n
+    if fixed < 0:                                    # lo medido es MÁS rápido que el punto de partida: manda lo medido
+        return 0.0, max(0.05, avg / max(1.0, n)), len(pts)   # (antes se quedaba el por-foto de partida, demasiado alto)
     return fixed, spp0, len(pts)
 
 

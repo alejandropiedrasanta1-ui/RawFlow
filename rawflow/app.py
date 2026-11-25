@@ -219,7 +219,8 @@ def _mix(a: QColor, b: QColor, k: float) -> QColor:
                            a.blueF() + (b.blueF() - a.blueF()) * k, a.alphaF() + (b.alphaF() - a.alphaF()) * k)
 
 
-STEP_ICONS = ("ph.download-simple", "ph.sparkle", "ph.aperture", "ph.magic-wand", "ph.user-focus", "ph.play-circle")
+STEP_ICONS = ("ph.download-simple", "ph.sparkle", "ph.aperture", "ph.magic-wand", "ph.user-focus", "ph.sun-horizon",
+              "ph.play-circle")      # uno por paso (4.24: faltaba el de Luminar y CineSlide se quedaba sin icono)
 
 
 class StepPill(QFrame):
@@ -241,7 +242,8 @@ class StepPill(QFrame):
         self.setObjectName("stepPill")
         self.setAttribute(Qt.WidgetAttribute.WA_Hover)
         self.setMinimumHeight(52)                  # con la ventana baja, nombre y carpeta nunca se montan
-        lay = QHBoxLayout(self)
+        self._compact = False
+        self.lay = lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 9, 6, 9)
         lay.setSpacing(7)
         self.num = QLabel(str(n))
@@ -302,6 +304,15 @@ class StepPill(QFrame):
     def resizeEvent(self, e):  # noqa: N802
         super().resizeEvent(e)
         self.ico.setVisible(self._pm_ok and self.width() >= self.WIDE)
+        compact = self.width() < self.WIDE
+        if compact != self._compact:               # estrecha: menos margen y sin «→», así cabe «Fotos buenas»
+            self._compact = compact                # entero (antes «→ Fotos bue…» con la ventana a 1440)
+            self.lay.setContentsMargins(*((6, 9, 2, 9) if compact else (8, 9, 6, 9)))
+            self.lay.setSpacing(5 if compact else 7)
+            self.set(self.state)
+
+    def _sub_display(self, text: str) -> str:
+        return text[2:] if self._compact and text.startswith("→ ") else text
 
     def set_unavailable(self, text: str, tip: str = ""):
         """El paso no existe en este equipo (la Selección IA en Windows): apagado siempre, con `text` en vez de
@@ -359,7 +370,7 @@ class StepPill(QFrame):
         elif self.num.text() in ("✓", "!", "–"):
             self.num.setText(str(self.property("n") or ""))
         note = {"ok": "✓ ", "warn": "! ", "off": "– "}.get(self.note_state, "") + self.note if self.note else ""
-        self.sub.setText((self.unavail or "Desactivado") if state == "off" else (note or self.sub_text))
+        self.sub.setText((self.unavail or "Desactivado") if state == "off" else (note or self._sub_display(self.sub_text)))
         self.num.setStyleSheet(f"background:{border if state not in ('wait', 'off') else T.BORDER}; color:"
                                f"{T.ACCENT_INK if state in ('run', 'done', 'skip') else T.TEXT}; border-radius:10px;")
         self.title.setStyleSheet(f"color:{T.TEXT if state not in ('wait', 'off') else T.MUTED};"
@@ -428,6 +439,13 @@ class TimePanel(QFrame):
         self.off: set = set()
         self.unavailable: Dict[int, str] = {}       # pasos que no existen en este equipo: {paso: «solo en Mac»}
 
+    @staticmethod
+    def _put(lbl: QLabel, text: str):
+        """Cambia un valor con un fundido corto (no salta de golpe); si no cambió, nada."""
+        if lbl.text() != text:
+            lbl.setText(text)
+            anim.fade_in(lbl, 260, start=0.2)
+
     def _style(self, i: int, state: str):
         name, val = self.rows[i]
         col = {"wait": T.MUTED, "run": T.ACCENT, "done": T.OK, "error": T.DANGER, "off": T.FAINT}[state]
@@ -446,10 +464,10 @@ class TimePanel(QFrame):
                 self.rows[i][1].setText("desactivado")
                 self._style(i, "off")
             else:
-                self.rows[i][1].setText(approx(e) + ("  · solo Bridge" if i in self.off else ""))
+                self._put(self.rows[i][1], approx(e) + ("  · solo Bridge" if i in self.off else ""))
                 self._style(i, "wait")
         self.total_name.setText("Total")
-        self.total.setText(approx(sum(est)))
+        self._put(self.total, approx(sum(est)))
         self.foot.setText(f"Si empiezas ahora, termina {end_phrase(sum(est))}")
 
     def begin_run(self, est: List[float], start_at: int):
@@ -488,7 +506,7 @@ class TimePanel(QFrame):
         elif state in ("done", "skip", "error") and self.start[i]:
             self.dur[i] = now - self.start[i]
             self._style(i, "error" if state == "error" else "done")
-            self.rows[i][1].setText(("✗ " if state == "error" else "✓ ") + fmt(self.dur[i]))
+            self._put(self.rows[i][1], ("✗ " if state == "error" else "✓ ") + fmt(self.dur[i]))
             if i == self.cur:
                 self.cur = -1
         self.tick()
@@ -1952,9 +1970,12 @@ class MainWindow(QMainWindow):
         self.cards_scroll.setVisible(cards and n > 0)
         self.cards_hint.setVisible(cards and n > 1)
         self.time_sep.setVisible(False)
+        was = self.time_fill.isVisible()
         self.time_fill.setVisible(not cards)
         if not cards:
             self.timepanel.show()
+        if was != (not cards):                     # la columna cambia de forma: entra con un fundido, no de golpe
+            anim.fade_in(self.timepanel, 280, start=0.15)
 
     @Slot(str)
     def _eject_toast(self, data: str):

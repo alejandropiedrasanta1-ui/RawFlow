@@ -335,6 +335,31 @@ def _changed(src: Path, out: Path, min_diff: float = 2.0) -> Tuple[int, List[str
     return ok, same
 
 
+def _settled(files: List[Path], most: float = 3.0) -> None:
+    """Espera a que los archivos más nuevos dejen de crecer (dos lecturas iguales seguidas), como mucho `most` s."""
+    def mtime(q):
+        try:
+            return q.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def sizes():
+        out = []
+        for p in sorted(files, key=mtime)[-4:]:
+            try:
+                out.append(p.stat().st_size)
+            except OSError:
+                out.append(-1)
+        return out
+    t0, last = time.time(), None
+    while time.time() - t0 < most:
+        cur = sizes()
+        if cur == last and -1 not in cur and 0 not in cur:
+            return
+        last = cur
+        time.sleep(0.4)
+
+
 def _export(s, out: Path, n: int, log: Log, should_stop=lambda: False, progress=lambda f: None) -> int:
     """Exportar → «JPEG · 100 % de calidad» → carpeta `out`. Espera a que estén las `n` fotos enteras."""
     import re
@@ -373,7 +398,7 @@ def _export(s, out: Path, n: int, log: Log, should_stop=lambda: False, progress=
             if k:
                 log(f"Luminar: {k:,} de {n:,} exportadas")
         if k >= n:
-            time.sleep(3)                            # la última termina de escribirse
+            _settled(fs)                             # la última termina de escribirse (antes 3 s fijos)
             return len(_jpgs(out))
         if time.time() - last_t > max(180, 30 + n * 3):
             iw.diag(s, "luminar-exportando")

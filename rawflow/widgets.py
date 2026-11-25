@@ -311,6 +311,8 @@ class SlimProgress(QWidget):
         self.update()
 
     def _tick(self):
+        if not self.isVisible():          # ventana escondida durante el proceso: no gastar 60 ticks por segundo
+            return
         self._phase = (self._phase + 0.012) % 1.0
         self.update()
 

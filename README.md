@@ -273,6 +273,19 @@ Enchufado y con el Mac fresco (base con ventilador, superficie dura, tapa abiert
 Si el preajuste usa algo que el motor directo no reproduce igual (máscaras, búsqueda de caras, ajustes por
 género, LUT, plugins demo o no instalados), RawFlow usa la ventana de Arams como antes (`arams_ui.py`).
 
+## Interfaz más pulida y tiempos reales en Windows (4.24)
+
+- Las pastillas de los pasos ya no cortan el texto con la ventana estrecha, y cada paso tiene su icono (Luminar lo
+  tenía mal y CineSlide no tenía).
+- Los tiempos cambian con un fundido corto; la pantalla de proceso va a 30 fps (y en ahorro, el cambio de paso
+  igual se ve fluido) y ya no crea una imagen de pantalla completa en cada fotograma.
+- **Estimación en Windows con lo medido en el PC**, no en el Mac: 612 fotos marcaban ≈14 h 30 y son ≈6 h 15
+  (Retouch4me ≈16,5 s/foto con 3 motores; DxO ≈4 s/foto). Si lo medido va más rápido que el punto de partida, manda
+  lo medido.
+- Luminar: al acabar de exportar espera solo hasta que los archivos dejan de crecer (antes, 3 s fijos).
+- Medido: 4 motores de Retouch4me no van más rápido que 3 (la tarjeta ya va al tope), y hacer Retouch4me a la vez
+  que Bridge exporta no ahorra tiempo (Bridge exporta a ~0,8 s/foto). Se queda como estaba.
+
 ## Luminar: paso 6 (Windows, 4.23)
 
 Después de Retouch4me, Luminar Neo da el toque final con tu preajuste **«CINEMA AJUSTE»** (Mis preajustes), como en

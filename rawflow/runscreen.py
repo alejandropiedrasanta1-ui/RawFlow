@@ -20,6 +20,10 @@ from .overlays import LEVEL_MAIN, set_level
 from .widgets import font
 
 
+FRAME_MS = 33                         # 30 fps con animación
+ECO_MS = 1000                         # 1 fps en ahorro (mientras DxO, Retouch4me… usan la tarjeta)
+
+
 def _ease(x: float) -> float:
     x = max(0.0, min(1.0, x))
     return 1 - (1 - x) ** 3
@@ -58,7 +62,9 @@ class RunScreen(QWidget):
         self.on_done: Optional[Callable] = None
         self._bg, self._bg_t, self._op, self._fonts = None, -1.0, -1.0, {}
         self._base, self._base_key = None, None
-        self.timer = QTimer(self, interval=66)          # 15 fps: fluido y gasta poco
+        self.timer = QTimer(self, interval=FRAME_MS)    # 30 fps (4.24; antes 15: el anillo y las ondas daban saltitos)
+        self._boost = 0.0                 # hasta cuándo va fluida aunque esté en ahorro (al cambiar de paso)
+        self._last_paint = 0.0
         self.timer.timeout.connect(self._frame)
         self._full_t = 0.0
 
@@ -70,7 +76,7 @@ class RunScreen(QWidget):
         if on == self.eco:
             return
         self.eco = on
-        self.timer.setInterval(1000 if on else 66)
+        self.timer.setInterval(ECO_MS if on else FRAME_MS)
         self.update()
 
     def _fade(self, now: float):
@@ -92,6 +98,10 @@ class RunScreen(QWidget):
         now = time.monotonic()
         self._fade(now)
         fading = now - self.t0 < 0.5 or (self.fin is not None)
+        if self.eco:                      # en ahorro, 1 fps; pero el cambio de paso (✓ que se dibuja, tramo que avanza)
+            want = FRAME_MS if (fading or now < self._boost) else ECO_MS     # se ve fluido ~1 s y vuelve a ahorro
+            if self.timer.interval() != want:
+                self.timer.setInterval(want)
         if self.eco and not fading:
             self.update()
             return
@@ -111,7 +121,7 @@ class RunScreen(QWidget):
         self.step_frac, self._base = -1.0, None
         self.eco = T.reduce_motion()                     # «Reducir movimiento» de macOS: sin animaciones
         self._closing, self._op = False, -1.0
-        self.timer.setInterval(1000 if self.eco else 66)
+        self.timer.setInterval(ECO_MS if self.eco else FRAME_MS)
         self.t0 = time.monotonic()
         scr = getattr(self, "target", None) or QGuiApplication.primaryScreen()     # la pantalla de la ventana de RawFlow
         self.setGeometry(scr.geometry())
@@ -124,6 +134,9 @@ class RunScreen(QWidget):
         if 0 <= i < len(self.state) and self.state[i] != state:
             self.state[i] = state
             self.changed[i] = time.monotonic()
+            if self.eco and self.isVisible():
+                self._boost = self.changed[i] + 1.0
+                self.timer.setInterval(FRAME_MS)
             if state == "run":
                 self.step_frac = -1.0
 
@@ -176,7 +189,9 @@ class RunScreen(QWidget):
     def paintEvent(self, e):  # noqa: N802
         now = time.monotonic()
         t = now - self.t0
-        self.shown += (self.overall - self.shown) * 0.15
+        dt = min(1.0, now - self._last_paint) if self._last_paint else 0.066
+        self._last_paint = now
+        self.shown += (self.overall - self.shown) * (1 - math.exp(-2.5 * dt))   # igual de suave a 30 fps que a 1 fps
 
         W, H = self.width(), self.height()
         # capa base (todo lo que no se mueve a cada fotograma): se rehace solo si algo cambió
@@ -210,8 +225,10 @@ class RunScreen(QWidget):
 
     def _render_base(self, W, H, t, now) -> QPixmap:
         dpr = self.devicePixelRatioF()
-        pm = QPixmap(int(W * dpr), int(H * dpr))
-        pm.setDevicePixelRatio(dpr)
+        pm = self._base                   # se reutiliza: a pantalla completa (3440×1440 al 150 %) son ~45 MB, y crearla
+        if pm is None or pm.width() != int(W * dpr) or pm.height() != int(H * dpr) or pm.devicePixelRatio() != dpr:
+            pm = QPixmap(int(W * dpr), int(H * dpr))      # de nuevo en cada fotograma gastaba memoria y CPU
+            pm.setDevicePixelRatio(dpr)
         if self._bg is None or (t - self._bg_t > 1.0 and not self.eco) or self._bg.deviceIndependentSize().width() < W - 1:
             self._bg, self._bg_t = self._render_bg(W, H, t), t
         p = QPainter(pm)

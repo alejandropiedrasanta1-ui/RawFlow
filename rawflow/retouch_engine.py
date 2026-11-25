@@ -464,7 +464,8 @@ def processes(n_fotos: int) -> int:
     return max(1, min(n, n_fotos))
 
 
-MAX_PROCS = 3
+MAX_PROCS = 3                 # 25-nov-2026, sin otras apps en la tarjeta: 3 → 17,5 s/foto, 4 → 17,4 s/foto y 15,3 GB de
+#                               16 (la GPU ya va al tope con 3): no compensa el riesgo de llenarla
 VRAM_PER_PROC = 3600          # MB por motor (medido: 1 motor +3,7 GB; 3 motores ≈ +10,5 GB)
 
 
