@@ -24,11 +24,14 @@ aunque se cierre: al abrirla, ofrece retomar el evento que quedó a medias).
 El paso 3 maneja Imagen y Bridge con la pantalla: deja el Mac desbloqueado y no toques nada.
 
 ## Abrir
-La carpeta `Instaladores` está ordenada por sistema (4.17): **`MAC`**, **`WINDOWS`** y, aparte,
-**`MÁQUINA VIRTUAL (solo en el Mac)`** (lo que usa «Instalar máquina virtual»; no se copia a la PC).
-- **Mac:** `Instaladores/MAC/RawFlow X para Mac.zip` → arrastra RawFlow.app a Aplicaciones
+Desde 4.26 la carpeta RAWFLOW es como sus hermanas (CINESLIDE, CINECAPTIONS): **`PROGRAMA`** (este código) e
+**`INSTALADORES`** con solo la versión más nueva en **`WINDOWS`** (`RawFlow X para Windows (Instalador).exe` +
+`Programas para Windows`) y **`MAC`** (`Instalar RawFlow X (Mac).zip`). Lo que usa «Instalar máquina virtual» en el
+Mac (ISO de Windows, Python para Windows) está en `PROGRAMA/MAQUINA VIRTUAL MAC` (no va en Git); `vm_programas`
+lo busca ahí y en el sitio de antes. Cada carpeta lleva su icono de Cinema Productions (`.cf` + `desktop.ini`).
+- **Mac:** `INSTALADORES/MAC/Instalar RawFlow X (Mac).zip` → doble clic en «Instalar RawFlow»
   (o, con el código, doble clic en `mac/Abrir RawFlow (Mac).command`).
-- **Windows:** copia `Instaladores/WINDOWS/RawFlow X para Windows (INSTALADOR).zip` a la PC (es lo único de
+- **Windows (antes de 4.21):** copia `Instaladores/WINDOWS/RawFlow X para Windows (INSTALADOR).zip` a la PC (es lo único de
   RawFlow que necesita), descomprímelo y doble clic en **«Instalar RawFlow.bat»** (lo demás va dentro de
   «archivos (no tocar)»): sin internet y sin administrador (trae Python
   3.14 x64/ARM, PySide6 Essentials y psutil), deja RawFlow en `%LOCALAPPDATA%\Programs\RawFlow` con

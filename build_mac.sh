@@ -96,12 +96,12 @@ ditto -c -k --sequesterRsrc --keepParent "$INST" "dist/Instalar RawFlow (Mac).zi
 #   Instaladores/MAC/Instalar RawFlow X (Mac).zip                    (dentro: «Instalar RawFlow.app», de un clic)
 #   Instaladores/WINDOWS/RawFlow X para Windows (INSTALADOR).zip     ← lo ÚNICO que se copia a la PC
 #   Instaladores/WINDOWS/Programas para Windows/                     (DxO, Imagen AI, Bridge, Retouch4me, CineSlide)
-#   Instaladores/MÁQUINA VIRTUAL (solo en el Mac)/                   (código para la máquina, Python, ISO de Windows)
+#   PROGRAMA/MAQUINA VIRTUAL MAC/                                    (código para la máquina, Python, ISO de Windows)
 # Solo Mac (sin rehacer el de Windows):  RAWFLOW_WINDOWS=0 ./build_mac.sh
 VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$P")
-IM="../Instaladores/MAC"
-IW="../Instaladores/WINDOWS"
-IV="../Instaladores/MÁQUINA VIRTUAL (solo en el Mac)"
+IM="../INSTALADORES/MAC"
+IW="../INSTALADORES/WINDOWS"
+IV="MAQUINA VIRTUAL MAC"        # (4.26) junto al código, fuera de los instaladores
 mkdir -p "$IM" "$IW/Programas para Windows" "$IV"
 rm -f "$IM"/RawFlow*Mac.zip "$IM"/Instalar*RawFlow*.zip
 cp "dist/Instalar RawFlow (Mac).zip" "$IM/Instalar RawFlow $VER (Mac).zip"
@@ -123,7 +123,7 @@ rm -rf "$(dirname "$STAGE")"
 #   arriba SOLO «Instalar RawFlow.bat», «Desinstalar RawFlow.bat» y LEEME; lo demás (Python 3.14 x64 y ARM, PySide6
 #   Essentials, psutil, RawFlow) dentro de «archivos (no tocar)»
 WPY="$IV/Python para Windows"
-[ -d "$WPY" ] || WPY="../Instaladores/Programas para Windows/1 Python (para RawFlow)"      # orden de antes
+[ -d "$WPY" ] || WPY="../INSTALADORES/Programas para Windows/1 Python (para RawFlow)"      # orden de antes
 # OJO: el instalador de Windows de verdad («RawFlow X para Windows (Instalador).exe», con RawFlow.exe y sin Python)
 # se compila EN WINDOWS con windows\build_windows.bat. Este zip antiguo (Python + librerías) ya solo se rehace si se
 # pide a propósito:  RAWFLOW_INSTALADOR_ZIP=1 ./build_mac.sh

@@ -29,10 +29,13 @@ CONHOST = r"C:\Windows\System32\conhost.exe"           # --headless: PowerShell 
 #   WINDOWS/                             RawFlow X para Windows (INSTALADOR).zip  ← lo ÚNICO que se copia a la PC
 #   WINDOWS/Programas para Windows/      DxO, Imagen AI, Bridge, Retouch4me, CineSlide (sus instaladores)
 #   MÁQUINA VIRTUAL (solo en el Mac)/    ISO de Windows 11, RawFlow-X-Windows-codigo.zip, Python para Windows
+# Desde 4.26 la máquina virtual NO está en «Instaladores» (ahí solo quedan los instaladores): está en
+# PROGRAMA/MAQUINA VIRTUAL MAC (junto al código). Se sigue entendiendo el sitio de antes.
 MAC_DIR = "MAC"
 WIN_DIR = "WINDOWS"
 PROGRAMS_DIR = "Programas para Windows"
 VM_DIR = "MÁQUINA VIRTUAL (solo en el Mac)"
+VM_DIR_NEW = "MAQUINA VIRTUAL MAC"                # dentro de PROGRAMA (el proyecto)
 PYTHON_DIR = "Python para Windows"
 OLD_RAWFLOW_DIR = "RawFlow para Windows"          # antes de 4.17
 
@@ -45,13 +48,18 @@ def programs_dir(root: Path) -> Path:
 
 def vm_dir(root: Path) -> Path:
     """Lo que solo usa «Instalar máquina virtual» desde el Mac: el código de RawFlow para Windows, Python y la ISO."""
+    proj = Path(__file__).resolve().parent.parent / VM_DIR_NEW          # PROGRAMA/MAQUINA VIRTUAL MAC (desde 4.26)
+    sibling = Path(root).parent / "PROGRAMA" / VM_DIR_NEW
+    for d in (proj, sibling):
+        if d.is_dir():
+            return d
     new, old = Path(root) / VM_DIR, Path(root) / OLD_RAWFLOW_DIR
     return old if old.is_dir() and not new.is_dir() else new
 
 
 def python_dir(root: Path) -> Optional[Path]:
     """Python para Windows (x64 y ARM) y sus librerías, sin internet."""
-    cands = [Path(root) / VM_DIR / PYTHON_DIR] + sorted(programs_dir(root).glob("*Python*"))
+    cands = [vm_dir(root) / PYTHON_DIR, Path(root) / VM_DIR / PYTHON_DIR] + sorted(programs_dir(root).glob("*Python*"))
     return next((d for d in cands if d.is_dir()), None)
 
 
@@ -104,6 +112,9 @@ class Servidor:
         from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
         root_dir = Path(root)
+        # (4.26) la máquina virtual ya no está dentro de «Instaladores» (PROGRAMA/MAQUINA VIRTUAL MAC): se sirve la
+        # carpeta que contiene las dos para que sus archivos sigan teniendo dirección
+        served = Path(os.path.commonpath([str(root_dir.resolve()), str(vm_dir(root_dir).resolve())]))
 
         class _Quiet(SimpleHTTPRequestHandler):
             def log_message(self, *a):
@@ -112,7 +123,7 @@ class Servidor:
             def do_PUT(self):                                 # Windows sube aquí el RawFlow.exe que compila
                 from urllib.parse import unquote
                 rel = unquote(self.path.lstrip("/"))
-                dest = (root_dir / rel).resolve()
+                dest = (served / rel).resolve()
                 ok = ((dest.parent == vm_dir(root_dir).resolve() and dest.suffix == ".zip")
                       or (dest.parent.parent == programs_dir(root_dir).resolve()
                           and dest.suffix.lower() in (".exe", ".msi", ".zip")))
@@ -135,7 +146,7 @@ class Servidor:
                     tmp.unlink(missing_ok=True)
                     self.send_response(400)
                 self.end_headers()
-        self.root, self.ip = Path(root), host_ip()
+        self.root, self.ip = served, host_ip()
         class _Srv(ThreadingHTTPServer):
             daemon_threads = True
 
@@ -395,7 +406,7 @@ def build_exe(vm: str, version: str, log: Log = print, root: Optional[Path] = No
     root = root or installers_root()
     p = plan(root, "amd64")
     if not p["python"] or not p["wheels"]:
-        raise RuntimeError(f"Faltan Python x64 y sus librerías en «Instaladores/{VM_DIR}/{PYTHON_DIR}».")
+        raise RuntimeError(f"Faltan Python x64 y sus librerías en «{vm_dir(root) / PYTHON_DIR}».")
     vm_dir(root).mkdir(parents=True, exist_ok=True)
     srv = Servidor(root)
     stage = STAGE + "\\x64-" + time.strftime("%Y%m%d-%H%M%S")

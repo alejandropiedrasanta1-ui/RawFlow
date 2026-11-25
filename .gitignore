@@ -21,3 +21,8 @@ Thumbs.db
 
 # Registros que deja el driver de NVIDIA en la carpeta desde la que se abre RawFlow
 NVIDIA Corporation/
+
+# Máquina virtual del Mac (ISO de Windows, Python para Windows): 8 GB, no va en Git
+MAQUINA VIRTUAL MAC/
+# Icono de la carpeta (desktop.ini + .cf)
+.cf/
