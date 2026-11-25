@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List
@@ -42,9 +43,18 @@ class DriveWatcher(QThread):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._stop = False
+        self._wake = threading.Event()
+        self._fast_until = 0.0
 
     def stop(self):
         self._stop = True
+        self._wake.set()
+
+    def poke(self):
+        """Windows avisó de un cambio de dispositivos (WM_DEVICECHANGE): mirar YA y, unos segundos, cada 0,25 s
+        (la letra sale antes de que se pueda leer la etiqueta). Antes se esperaba la siguiente vuelta (hasta 0,8 s)."""
+        self._fast_until = time.monotonic() + 4.0
+        self._wake.set()
 
     def run(self):
         last = None
@@ -61,10 +71,10 @@ class DriveWatcher(QThread):
                     self.changed.emit(drives)
             except Exception:  # noqa: BLE001
                 pass
-            for _ in range(8):                  # ~0,8 s entre vueltas, cortable
-                if self._stop:
-                    return
-                time.sleep(0.1)
+            if self._stop:
+                return
+            self._wake.wait(0.25 if time.monotonic() < self._fast_until else 0.8)   # cortable y despertable
+            self._wake.clear()
 
 
 class UpdateWorker(QThread):
@@ -123,10 +133,14 @@ class ScanWorker(QThread):
             # skip_events: en un disco externo de trabajo (que también sale como «memoria») jamás se entra en las
             # carpetas de eventos ya hechos: sus RAW y sus DNG se movían al evento nuevo, vaciando los anteriores
             files = core.scan_drive(self.key, prog, lambda: self._stop, skip_events=True)
-        for f in files:                     # la hora de cada TOMA (para ver si la memoria trae varios eventos): aquí,
-            if self._stop:                  # en segundo plano, y no al pintar el resumen (≈5 ms por foto)
-                return
-            core.shot_time(f)
+        # la hora de cada TOMA (para ver si la memoria trae varios eventos): aquí, en segundo plano, y no al pintar el
+        # resumen. (4.26) Varias a la vez: 1.300 NEF 5,8 s → 0,6 s (el disco atiende varias lecturas pequeñas juntas)
+        from concurrent.futures.thread import ThreadPoolExecutor
+        with ThreadPoolExecutor(8) as ex:
+            for _ in ex.map(lambda f: None if self._stop else core.shot_time(f), files):
+                pass
+        if self._stop:
+            return
         # ¿uno o varios eventos? En cada hueco de 4 h o más se mira si es la MISMA gente (≈8 s por hueco; solo si los
         # hay). Lo usa el botón «2 eventos» (se ilumina si son dos claros) y dónde separar si lo pulsas.
         if core.SYSTEM == "Windows" and os.environ.get("RAWFLOW_SIN_APPS") != "1":
@@ -1262,10 +1276,14 @@ class MainWindow(QMainWindow):
         self.dropped.pop(key, None)
         card = self.cards.pop(key)
         card.setEnabled(False)                       # ya no cuenta: sale encogiéndose y se quita al terminar
+        self._leaving = getattr(self, "_leaving", 0) + 1
 
         def gone(c=card):
             c.setParent(None)
             c.deleteLater()
+            self._leaving = max(0, getattr(self, "_leaving", 1) - 1)
+            if not self.cards and not self._leaving and self.drive_head.isVisible():
+                self._left_mode("cards")             # ya salió la última: ahora sí, «Conecta una memoria»
         anim.slide_out(card, gone)
         self.results.pop(key, None)
 
@@ -1965,9 +1983,17 @@ class MainWindow(QMainWindow):
         """cards: memorias (+ estimación abajo) · run/result: solo los tiempos, arriba."""
         cards = mode == "cards"
         n = len(self.cards)
+        leaving = cards and n == 0 and getattr(self, "_leaving", 0) > 0 and self.cards_scroll.isVisible()
         self.drive_head.setVisible(cards)
-        self.empty.setVisible(cards and n == 0)
-        self.cards_scroll.setVisible(cards and n > 0)
+        # (4.26) la última memoria se iba de golpe: la lista se ocultaba antes de que su tarjeta se encogiera. Ahora
+        # la lista sigue hasta que acaba de salir y el «Conecta una memoria» entra con un fundido.
+        show_empty = cards and n == 0 and not leaving
+        if show_empty and not self.empty.isVisible():
+            self.empty.setVisible(True)
+            anim.fade_in(self.empty, 320, start=0.0)
+        else:
+            self.empty.setVisible(show_empty)
+        self.cards_scroll.setVisible(cards and (n > 0 or leaving))
         self.cards_hint.setVisible(cards and n > 1)
         self.time_sep.setVisible(False)
         was = self.time_fill.isVisible()
@@ -2299,6 +2325,24 @@ class MainWindow(QMainWindow):
             m = lay.contentsMargins()
             if m.left() != side:
                 lay.setContentsMargins(side, m.top(), side, m.bottom())
+
+    def nativeEvent(self, kind, message):  # noqa: N802
+        """Windows: WM_DEVICECHANGE (memoria puesta o quitada) despierta al vigilante al instante."""
+        if sys.platform == "win32" and kind == b"windows_generic_MSG":
+            try:
+                import ctypes.wintypes
+                msg = ctypes.wintypes.MSG.from_address(int(message))
+                if msg.message == 0x0219 and msg.wParam in (0x0007, 0x8000, 0x8004):   # NODES_CHANGED, ARRIVAL, REMOVE
+                    self.watcher.poke()
+                    t = getattr(self, "toast", None)
+                    if t is not None:
+                        try:
+                            t.poke()                     # el aviso «retira la memoria» mira si ya la quitaste
+                        except (RuntimeError, AttributeError):
+                            pass
+            except Exception:  # noqa: BLE001
+                pass
+        return super().nativeEvent(kind, message)
 
     def closeEvent(self, e):  # noqa: N802
         if self.pipe and self.pipe.isRunning():

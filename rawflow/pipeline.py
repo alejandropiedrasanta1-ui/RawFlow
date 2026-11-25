@@ -1428,7 +1428,12 @@ class Pipeline(QThread):
                 disk = core.release_drive(mp)
                 ok = disk is not None
             else:
+                dev = core.win_device_id(mp) if core.SYSTEM == "Windows" else ""
                 disk, ok = "", core.eject_drive(mp)
+                if ok and dev:                    # USB expulsada entera (en espera hasta desenchufarla): el aviso se
+                    present, problem = core.win_devnode(dev)      # queda hasta que la quitas de verdad
+                    if present and problem == 47:
+                        disk = "win:" + dev
             (out if ok else bad).append(Path(mp).name)
             if ok:
                 items.append({"name": Path(mp).name, "disk": disk or ""})

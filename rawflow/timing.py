@@ -99,7 +99,7 @@ def model(phase: str, hist=None) -> Tuple[float, float, int]:
 def _sel_time(n: int) -> float:
     """Selección IA: Mac ≈0,07 s por foto (vista previa del RAW con Vision); Windows ≈0,17 s (OpenCV), medido con NEF."""
     import sys
-    return 2.0 + 0.08 * n if sys.platform == "darwin" else 4.0 + 0.2 * n
+    return 2.0 + 0.08 * n if sys.platform == "darwin" else 3.0 + 0.04 * n   # (4.26) varias a la vez: 435 en 19 s
 
 
 def _tanda1(n: int) -> int:
@@ -149,6 +149,9 @@ class Estimator:
         dng_bytes = nbytes * DNG_PER_RAW
         small = sum(b for _, b, _ in h.get("imagen", [])[-5:]) / max(1, len(h.get("imagen", [])[-5:]))
         upload = max(0.0, dng_bytes - small) / upload_bps(h)
+        import sys
+        if sys.platform == "win32" and h.get("imagen") and not h.get("subida"):
+            upload = 0.0             # Windows: lo anotado de Imagen ya lleva la subida (y no sube el DNG entero)
         sel = _sel_time(n)                               # Selección IA: por foto (vista previa del RAW)
         est = [max(2.0, nbytes / _move_bps(h)), sel, p("dxo"), p("imagen") + upload + p("bridge"), p("ret"), p("lum"),
                p("pres")]

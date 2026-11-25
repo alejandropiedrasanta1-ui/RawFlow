@@ -74,17 +74,28 @@ def slide_in(w: QWidget, ms: int = 420):
 
     a.valueChanged.connect(step)
     a.finished.connect(done)
+    w._rf_slide = a
     _hold(a)
 
 
 def slide_out(w: QWidget, then=None, ms: int = 240):
     """La tarjeta se encoge hasta 0 de alto mientras se desvanece, y entonces se quita (`then`)."""
+    old = getattr(w, "_rf_slide", None)
+    if old is not None:               # aún entrando (memoria quitada al momento): se para y sale desde donde estaba
+        try:
+            old.stop()
+        except RuntimeError:
+            pass
+        _drop(old)
     if T.reduce_motion() or not w.isVisible():
         if then:
             then()
         return
     eff = QGraphicsOpacityEffect(w)
+    old_eff = w.graphicsEffect()
+    start_op = old_eff.opacity() if isinstance(old_eff, QGraphicsOpacityEffect) else 1.0
     w.setGraphicsEffect(eff)
+    eff.setOpacity(start_op)
     h0 = max(1, w.height())
     a = QVariantAnimation(w, startValue=0.0, endValue=1.0, duration=ms, easingCurve=QEasingCurve.Type.InOutCubic)
 
@@ -92,7 +103,7 @@ def slide_out(w: QWidget, then=None, ms: int = 240):
         v = float(v)
         try:
             w.setFixedHeight(int(h0 * (1.0 - v)))     # alto exacto en cada fotograma (la tarjeta no tiene «tamaño ideal»)
-            eff.setOpacity(1.0 - v)
+            eff.setOpacity(start_op * (1.0 - v))
         except RuntimeError:          # ya no existe
             a.stop()
 

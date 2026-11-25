@@ -608,6 +608,9 @@ def _wait_ready(s: Screen, dng_dir: Path, project: str, wait_minutes: int) -> No
                 + (f"  ·  quedan {_mmss(left)}" if left else ""))
             live.set("subida", f"{speed / 1e6:.1f} MB/s  ·  {int(pct * 100)} %" + (f"  ·  quedan {_mmss(left)}" if left else ""))
         elif any(k in nst for k in ("edicion", "editando", "procesando")) and "ediciones" not in btn:
+            if up0 and not edit_t0 and up0[1] < 0.9:      # subida vista de principio a fin: su velocidad real
+                from .timing import record
+                record("subida", n_dng, int((1 - up0[1]) * total), time.time() - up0[0])
             edit_t0 = edit_t0 or time.time()
             el = time.time() - edit_t0
             _prog(0.32 + 0.43 * min(0.97, el / max(60.0, 6.0 * n_dng)))
@@ -1053,14 +1056,23 @@ def run(event_dir: Path, dng_subfolder: str, log: Log, should_stop=lambda: False
     dng_dir = event_dir / dng_subfolder
     out = Path(out_dir) if out_dir else event_dir / core.IMAGEN_SUBFOLDER
     dngs = sorted(dng_dir.glob("*.dng"))
+    from .timing import record                   # (4.26) en Windows no se anotaban: Imagen se estimaba 1 h 13, tardó 14 min
+    nbytes = sum(p.stat().st_size for p in dngs)
+    fresh = not (dng_dir / ".rawflow_imagen_ok").exists() and not (dng_dir / ".rawflow_imagen_proyecto").exists()
+    t0 = time.monotonic()
     edit(event_dir, dng_subfolder, log, should_stop, photo_type=photo_type,
          progress=lambda f: progress(0.8 * f), charge_ok=charge_ok)
+    if fresh:                                    # solo una pasada entera (subir + editar + descargar) dice el tiempo
+        record("imagen", len(dngs), nbytes, time.monotonic() - t0)
     falta = core.without_imagen(dngs)
     if falta:                                    # CANDADO: nunca a Bridge una foto sin las ediciones de Imagen
         raise UIError(f"{len(falta)} DNG sin las ediciones de Imagen: no se exportan.")
     close_app(EXE)
-    bridge_export(Screen(log, should_stop, BRIDGE_EXE), dng_dir, out, len(dngs),
-                  progress=lambda f: progress(0.8 + 0.2 * f))
+    t0 = time.monotonic()
+    k = bridge_export(Screen(log, should_stop, BRIDGE_EXE), dng_dir, out, len(dngs),
+                      progress=lambda f: progress(0.8 + 0.2 * f))
+    if k >= len(dngs):
+        record("bridge", len(dngs), nbytes, time.monotonic() - t0)
     close_app(BRIDGE_EXE)
     return out
 

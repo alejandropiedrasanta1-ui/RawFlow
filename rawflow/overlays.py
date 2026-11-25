@@ -34,6 +34,7 @@ TOAST_RECT = None        # rectángulo del aviso de la memoria en pantalla (el O
 class EjectToast(QWidget):
     """«Ya puedes retirar la memoria», con la tarjeta saliendo del lector. Se QUEDA en pantalla, animándose, hasta que
     sacas la memoria de verdad: RawFlow la desmonta sin expulsarla y vigila /dev/diskN, que macOS borra al retirarla.
+    En Windows vigila el dispositivo USB expulsado («win:<id>», en espera hasta desenchufarlo; core.win_devnode).
     No recibe clics (RawFlow sigue manejando las apps de debajo). Al acabar el evento, un clic también lo cierra, por
     si algún lector no avisara al sacar la tarjeta."""
 
@@ -101,8 +102,13 @@ class EjectToast(QWidget):
             self.tick.start()
         if self.watching():
             self.poll.start()
-        else:                                          # no hay disco que vigilar: aviso corto, como antes
-            QTimer.singleShot(4200, self._out)
+        else:                                          # no hay disco que vigilar (lector que solo suelta la tarjeta)
+            QTimer.singleShot(9000, self._out)         # (antes 4,2 s: se iba antes de llegar a sacarla)
+
+    def poke(self):
+        """Windows avisó de un cambio de dispositivos: mirar ya si la quitaste (sin esperar a la siguiente vuelta)."""
+        if self.watching() and not self._closing and not self.done_t:
+            self._check()
 
     def allow_dismiss(self):
         """Fin del evento: si el aviso sigue, un clic lo cierra."""
@@ -113,7 +119,9 @@ class EjectToast(QWidget):
         set_level(self, LEVEL_TOAST)
 
     def _tick(self):
-        if self.done_t:
+        if self.done_t:                                # «✓ Memoria retirada»: la palomita se dibuja (≈0,4 s)
+            if time.monotonic() - self.done_t < 0.5:
+                self.update()
             return
         el = (time.monotonic() - self.t0) % self.CYCLE
         if el < self.MOVE:                             # sale del lector y se desvanece
@@ -134,8 +142,10 @@ class EjectToast(QWidget):
         if not still and not self.done_t:              # retirada: «✓ Memoria retirada» y se va
             self.poll.stop()
             self.done_t = time.monotonic()
+            if not self.tick.isActive() and not T.reduce_motion():
+                self.tick.start()                      # (para dibujar la palomita)
             self.update()
-            QTimer.singleShot(1100, self._out)
+            QTimer.singleShot(1400, self._out)
 
     def _out(self):
         global TOAST_RECT
@@ -157,19 +167,33 @@ class EjectToast(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect()).adjusted(4, 4, -4, -4)
         ok = bool(self.done_t)
-        p.setPen(QPen(QColor(T.OK if ok else T.ACCENT), 1.5))
+        # (4.26) al retirarla ya no cambia de golpe: el borde pasa a verde, la palomita se dibuja y el texto entra
+        k = 1.0 if (not ok or T.reduce_motion()) else min(1.0, (time.monotonic() - self.done_t) / 0.4)
+        ease = QEasingCurve(QEasingCurve.Type.OutCubic).valueForProgress(k)
+        if ok:
+            a, b = QColor(T.ACCENT), QColor(T.OK)
+            edge = QColor.fromRgbF(a.redF() + (b.redF() - a.redF()) * ease, a.greenF() + (b.greenF() - a.greenF()) * ease,
+                                   a.blueF() + (b.blueF() - a.blueF()) * ease)
+        else:
+            edge = QColor(T.ACCENT)
+        p.setPen(QPen(edge, 1.5))
         p.setBrush(QColor(T.SURFACE))
         p.drawRoundedRect(r, 20, 20)
         if ok:                                         # memoria retirada
-            p.setPen(QPen(QColor(T.OK), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             path = QPainterPath()
             path.moveTo(r.left() + 52, r.center().y() + 2)
             path.lineTo(r.left() + 70, r.center().y() + 20)
             path.lineTo(r.left() + 104, r.center().y() - 18)
+            pen = QPen(QColor(T.OK), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            if ease < 1.0:                             # trazo parcial: la palomita se dibuja de izquierda a derecha
+                n = path.length() / 4.0                # (el patrón va en anchos de línea)
+                pen.setDashPattern([max(0.01, n * ease), n + 1])
+            p.setPen(pen)
             p.drawPath(path)
+            p.setOpacity(ease)
             p.setPen(QColor(T.TEXT))
             p.setFont(font(20, QFont.Weight.Bold))
-            p.drawText(QRectF(r.left() + 150, r.top(), r.width() - 165, r.height()),
+            p.drawText(QRectF(r.left() + 150 - 12 * (1 - ease), r.top(), r.width() - 165, r.height()),
                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "Memoria retirada")
             return
         # ranura del lector (abajo) y tarjeta SD saliendo hacia arriba, desvaneciéndose

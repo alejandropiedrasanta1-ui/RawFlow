@@ -318,21 +318,22 @@ def _changed(src: Path, out: Path, min_diff: float = 2.0) -> Tuple[int, List[str
     el preajuste, volver a guardar el JPEG da ≈0,8-1,1; con «CINEMA AJUSTE», ≈5). (cuántas cambiaron, las que no)."""
     import cv2
     import numpy as np
-    ok, same = 0, []
-    for p in _jpgs(src):
+    from concurrent.futures.thread import ThreadPoolExecutor
+
+    def diff(p: Path) -> float:
         q = Path(out) / p.name
         try:
             a = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_REDUCED_COLOR_8)
             b = cv2.imdecode(np.fromfile(str(q), np.uint8), cv2.IMREAD_REDUCED_COLOR_8)
             b = cv2.resize(b, (a.shape[1], a.shape[0]))
-            d = float(np.abs(a.astype(np.int16) - b.astype(np.int16)).mean())
+            return float(np.abs(a.astype(np.int16) - b.astype(np.int16)).mean())
         except Exception:  # noqa: BLE001
-            d = 0.0
-        if d >= min_diff:
-            ok += 1
-        else:
-            same.append(p.name)
-    return ok, same
+            return 0.0
+    fotos = _jpgs(src)
+    with ThreadPoolExecutor(max(2, min(8, (os.cpu_count() or 4) // 2))) as ex:   # (4.26) 411 fotos: 68 s → unos 12 s
+        ds = list(ex.map(diff, fotos))
+    same = [p.name for p, d in zip(fotos, ds) if d < min_diff]
+    return len(fotos) - len(same), same
 
 
 def _settled(files: List[Path], most: float = 3.0) -> None:

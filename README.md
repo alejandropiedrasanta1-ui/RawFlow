@@ -289,6 +289,25 @@ encuentra por su sitio (entre «Perfiles de IA» y «Social Spotlight»).
 - El nombre del proyecto se escribe clicando dentro de su casilla y se comprueba (una vez se creó como «2 DNGs»).
 - Cada vez que algo no aparece en pantalla se guarda una captura en «diagnostico» y el registro dice cuál es.
 
+## Memorias más rápidas y aviso de retirarla (4.26, Windows)
+
+- **Detectar la memoria**: Windows avisa al ponerla (WM_DEVICECHANGE) y RawFlow mira al instante y cada 0,25 s
+  unos segundos (antes, la siguiente vuelta de 0,8 s). Las horas de cada toma se leen con 8 hilos: la tarjeta de
+  681 fotos, 7,4 s → 2,5 s.
+- **Aviso «Ya puedes retirar la memoria»**: en Windows se iba a los 4 s. Ahora vigila el dispositivo USB expulsado
+  (`core.win_device_id` antes de expulsar + `core.win_devnode`: sigue «en espera», problema 47, hasta
+  desenchufarlo) y se queda hasta que la quitas. Un lector que solo suelta la tarjeta no avisa al sacarla: ahí
+  el aviso dura 9 s.
+- **Mover**: la tarjeta manda (≈75 MB/s medidos); mientras se lee una foto otro hilo cierra la anterior (fsync y
+  comprobación) y las originales se borran al final de cada memoria, solo si su copia quedó completa.
+- **Animaciones**: al quitar la última memoria, su tarjeta se iba de golpe (la lista se ocultaba antes de que se
+  encogiera); ahora sale encogiéndose y «Conecta una memoria» entra con un fundido. Una memoria quitada mientras
+  aún entraba sale desde donde estaba (`anim.slide_out` para la entrada). «Memoria retirada»: el borde pasa a verde
+  y la palomita se dibuja. Comprobado con fotogramas de una memoria simulada.
+- **Estimaciones**: Imagen y Bridge en Windows no guardaban su tiempo real (Imagen salía 1 h 13 y tardó 14 min);
+  ahora sí, y la Selección IA usa lo medido (435 fotos en 19 s). Luminar compara sus fotos con varios hilos
+  (411: 68 s → 15 s).
+
 ## Luminar con cientos de fotos (4.25)
 
 Con 411 fotos, el paso 6 fallaba tres veces («Luminar no seleccionó las 411 fotos para exportar»): tras pegar el

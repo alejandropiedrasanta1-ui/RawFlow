@@ -703,39 +703,60 @@ def move_files_parallel(files: List[RawFile], dest_dir: Path,
         except Exception as e:  # noqa: BLE001
             done(0, name, "removed_err", str(e))
 
-    def one_drive(group: List[RawFile]):
-        for f in group:
-            if should_stop():
-                return
-            name = os.path.basename(f.path)
-            target, same = pick(name, f.size, f.path)
-            if same:
-                done(f.size, name, "skipped")
-                remove(f, name)
-                continue
-            tmp = target.with_name(target.name + ".part")
+    def fail(f: RawFile, name: str, tmp: Path, e: Exception):
+        try:
+            Path(tmp).unlink(missing_ok=True)
+        except OSError:                             # ni se puede quitar el resto: que no tumbe toda la memoria
+            pass
+        done(f.size, name, "failed", str(e))
+
+    def finish(f: RawFile, name: str, tmp: Path, target: Path, ok_list: list):
+        """Cierra una copia (en otro hilo, mientras se lee la siguiente): a disco, misma hora, mismo tamaño."""
+        try:
+            # Windows: fsync pide escritura. Y SIEMPRE en binario (O_BINARY): abierto en modo texto para leer y
+            # escribir, Windows le QUITA el último byte al archivo si es 0x1A («fin de archivo» de MS-DOS); la
+            # foto quedaba 1 byte más corta, no pasaba la comprobación de tamaño y se quedaba fuera del evento.
+            fd = os.open(tmp, (os.O_RDWR | getattr(os, "O_BINARY", 0)) if SYSTEM == "Windows" else os.O_RDONLY)
             try:
-                shutil.copyfile(f.path, tmp)            # fcopyfile: copia en el kernel
-                # Windows: fsync pide escritura. Y SIEMPRE en binario (O_BINARY): abierto en modo texto para leer y
-                # escribir, Windows le QUITA el último byte al archivo si es 0x1A («fin de archivo» de MS-DOS); la
-                # foto quedaba 1 byte más corta, no pasaba la comprobación de tamaño y se quedaba fuera del evento.
-                fd = os.open(tmp, (os.O_RDWR | getattr(os, "O_BINARY", 0)) if SYSTEM == "Windows" else os.O_RDONLY)
-                try:
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
-                _copy_times(f.path, tmp)
-                if os.path.getsize(tmp) != f.size:
-                    raise IOError("el tamaño no coincide tras copiar")
-                os.replace(tmp, target)
-                done(f.size, name, "copied")
-                remove(f, name)
-            except Exception as e:  # noqa: BLE001
-                try:
-                    Path(tmp).unlink(missing_ok=True)
-                except OSError:                     # ni se puede quitar el resto: que no tumbe toda la memoria
-                    pass
-                done(f.size, name, "failed", str(e))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            _copy_times(f.path, tmp)
+            if os.path.getsize(tmp) != f.size:
+                raise IOError("el tamaño no coincide tras copiar")
+            os.replace(tmp, target)
+            done(f.size, name, "copied")
+            ok_list.append((f, name))
+        except Exception as e:  # noqa: BLE001
+            fail(f, name, tmp, e)
+
+    def one_drive(group: List[RawFile]):
+        # (4.26) La lectura de la tarjeta manda (≈75 MB/s medidos): mientras se lee una foto, otro hilo cierra la
+        # anterior (fsync + comprobar) y las originales se borran AL FINAL de la memoria, no entre lectura y lectura.
+        # Cada original solo se borra si su copia quedó completa, en disco y con el mismo tamaño (como antes).
+        ok_list: list = []
+        with ThreadPoolExecutor(max_workers=1) as closer:
+            try:
+                for f in group:
+                    if should_stop():
+                        return
+                    name = os.path.basename(f.path)
+                    target, same = pick(name, f.size, f.path)
+                    if same:
+                        done(f.size, name, "skipped")
+                        ok_list.append((f, name))
+                        continue
+                    tmp = target.with_name(target.name + ".part")
+                    try:
+                        shutil.copyfile(f.path, tmp)    # copia en el kernel (fcopyfile / CopyFile2)
+                    except Exception as e:  # noqa: BLE001
+                        fail(f, name, tmp, e)
+                        continue
+                    closer.submit(finish, f, name, tmp, target, ok_list)
+            finally:
+                closer.shutdown(wait=True)              # todas cerradas antes de borrar nada
+                for f, name in list(ok_list):
+                    remove(f, name)
 
     # Dos memorias con LAS MISMAS fotos (cámara con doble ranura en espejo): leídas a la vez, la segunda no veía aún
     # la copia de la primera (a medio escribir) y guardaba la misma foto otra vez como «DSC0001_1» → el evento entero
@@ -900,8 +921,46 @@ def release_drive(mountpoint: str) -> Optional[str]:
 
 
 def drive_present(disk: str) -> bool:
-    """¿Sigue puesta la memoria «diskN»? (al sacarla, macOS borra /dev/diskN al instante)."""
+    """¿Sigue puesta la memoria «diskN»? (al sacarla, macOS borra /dev/diskN al instante). En Windows «win:<id>»: el
+    dispositivo expulsado sigue en la lista (en espera, problema 47) hasta que lo desenchufas."""
+    if disk.startswith("win:"):
+        return win_devnode(disk[4:])[0]
     return bool(disk) and os.path.exists(f"/dev/{disk}")
+
+
+def win_device_id(root: str) -> str:
+    """Windows: el id del dispositivo (USBSTOR\\DISK&VEN_…\\…&0) de la memoria con esa letra, o "" si no se sabe.
+    Se pregunta ANTES de expulsarla (después la letra ya no está)."""
+    letter = root[:1]
+    if SYSTEM != "Windows" or not (letter.isascii() and letter.isalpha()):
+        return ""
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command",
+                              f"(Get-Partition -DriveLetter {letter} -ErrorAction Stop | Get-Disk).Path"],
+                             capture_output=True, text=True, timeout=20,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.strip()
+    except Exception:  # noqa: BLE001
+        return ""
+    p = out.splitlines()[0] if out else ""        # \\?\usbstor#disk&ven_…&rev_…#serie&0#{53f56307-…}
+    if not p.startswith("\\\\?\\") or "#{" not in p:
+        return ""
+    return p[4:].split("#{")[0].replace("#", "\\").upper()
+
+
+def win_devnode(dev_id: str):
+    """(¿está en la lista de dispositivos?, nº de problema o 0) del dispositivo `dev_id` (cfgmgr32, sin PowerShell:
+    se puede mirar cada medio segundo). 47 = «preparado para quitarlo con seguridad, pero aún no se quitó»."""
+    if not dev_id or SYSTEM != "Windows":
+        return False, 0
+    import ctypes
+    from ctypes import wintypes
+    cm = ctypes.WinDLL("cfgmgr32")
+    dn, status, problem = wintypes.DWORD(0), wintypes.ULONG(0), wintypes.ULONG(0)
+    if cm.CM_Locate_DevNodeW(ctypes.byref(dn), ctypes.c_wchar_p(dev_id), 0) != 0:   # 0 = normal: solo si está puesto
+        return False, 0
+    if cm.CM_Get_DevNode_Status(ctypes.byref(status), ctypes.byref(problem), dn, 0) != 0:
+        return True, 0
+    return True, int(problem.value) if status.value & 0x400 else 0                     # DN_HAS_PROBLEM
 
 
 def power_state():
