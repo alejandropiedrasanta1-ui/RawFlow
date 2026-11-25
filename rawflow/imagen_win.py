@@ -110,7 +110,7 @@ class Screen:
         time.sleep(0.8)
 
     # ---- leer
-    def ocr(self) -> List[dict]:
+    def ocr(self, scale: int = 1) -> List[dict]:
         try:
             self.front()
         except Exception:  # noqa: BLE001
@@ -119,7 +119,9 @@ class Screen:
         if not w:
             return []
         self.rect = w["rect"]
-        return ws.ocr(w["rect"])
+        if scale > 1 and max(w["rect"][2], w["rect"][3]) * scale > 9000:   # límite del OCR de Windows (~10.000 px)
+            scale = 1
+        return ws.ocr(w["rect"], scale=scale)
 
     def find(self, text: str, exact: bool = False, boxes=None, region=None) -> List[dict]:
         """`region` = (x0, y0, x1, y1) en fracciones de la ventana (0..1): vale para cualquier tamaño de pantalla."""
@@ -139,17 +141,21 @@ class Screen:
         return region[0] <= cx <= region[2] and region[1] <= cy <= region[3]
 
     def wait(self, *texts: str, timeout: float = 30, exact: bool = False, region=None) -> dict:
-        t0 = time.time()
+        t0, k = time.time(), 0
         while time.time() - t0 < timeout:
             if self.should_stop():
                 raise UIError("Cancelado.")
-            boxes = self.ocr()
+            # una vuelta sí y otra no, leída AMPLIADA ×2: la letra pequeña («Bodas», 12 px) y la blanca sobre rojo
+            # («Explorar», «Siguiente») a veces no se leían a tamaño real y el paso 4 se paraba (24-nov-2026)
+            boxes = self.ocr(scale=2 if k % 2 else 1)
+            k += 1
             for txt in texts:
                 f = self.find(txt, exact, boxes, region)
                 if f:
                     self._last = (txt, f)
                     return f[0]
             time.sleep(0.2)
+        diag(self, "no-aparece-" + texts[0], boxes if "boxes" in locals() else None)
         raise UIError(f"No apareció «{' / '.join(texts)}» en pantalla.")
 
     # ---- tocar
@@ -180,13 +186,20 @@ class Screen:
 
 def diag(s: Screen, label: str, boxes=None) -> None:
     """Guarda lo que ve RawFlow cuando algo no aparece (captura + ventana de delante + textos leídos) en
-    %APPDATA%/RawFlow/diagnostico (las 12 últimas), para entender el fallo sin tener que repetirlo."""
+    %APPDATA%/RawFlow/diagnostico (los 40 últimos), para entender el fallo sin tener que repetirlo. El registro dice
+    qué captura es (4.25: antes no lo decía y había que adivinarla por la hora)."""
     try:
+        import re as _re
         d = WORK / "diagnostico"
         d.mkdir(parents=True, exist_ok=True)
-        for old in sorted(d.glob("*"))[:-22]:
+        for old in sorted(d.glob("*"))[:-78]:
             old.unlink()
+        label = _re.sub(r"[^\w-]+", "-", norm(label)).strip("-")[:50] or "fallo"
         stem = d / f"{time.strftime('%Y%m%d-%H%M%S')}-{label}"
+        try:
+            s.log(f"   (captura del fallo: {stem.name}.png en «diagnostico»)")
+        except Exception:  # noqa: BLE001
+            pass
         fg = ws.foreground()
         w = s.window() or s.main_window()
         if w:
@@ -223,7 +236,19 @@ def _launch(s: Screen, wait: float = 90) -> None:
 
 def _sidebar(s: Screen, boxes) -> Optional[dict]:
     side = [b for b in boxes if norm(b["t"]).replace(" ", "") == "proyectos" and s.inside(b, (0, 0.12, 0.06, 0.6))]
-    return side[0] if side else None
+    if side:
+        return side[0]
+    # Imagen abre ahora en «Inicio» y el OCR de Windows a veces NO lee «Proyectos» en la barra lateral (24-nov-2026: 4
+    # intentos seguidos sin leerlo; sí leía «Inicio», «Perfiles de IA», «Social Spotlight»). Su botón está siempre entre
+    # «Perfiles de IA» y «Social Spotlight»: se toma ese hueco.
+    reg = (0, 0.1, 0.08, 0.75)
+    perf = [b for b in boxes if norm(b["t"]).strip().startswith("perfiles de") and s.inside(b, reg)]
+    soc = [b for b in boxes if norm(b["t"]).strip().startswith("social") and s.inside(b, reg)]
+    if perf and soc and soc[0]["y"] - perf[0]["y"] > 3 * perf[0]["h"]:
+        a, c = perf[0], soc[0]
+        y = (a["y"] + c["y"]) / 2 + 0.4 * a["h"]
+        return {"t": "Proyectos", "x": min(a["x"], c["x"]), "y": y, "w": max(a["w"], c["w"]), "h": a["h"]}
+    return None
 
 
 def _clear(s: Screen, timeout: float = 90) -> None:
@@ -249,7 +274,12 @@ def _clear(s: Screen, timeout: float = 90) -> None:
             continue
         s.esc()
         time.sleep(0.8)
-        close = [b for b in s.ocr() if norm(b["t"]).strip() in ("cancelar", "cerrar", "descartar cambios", "cancel", "close")]
+        now = s.ocr()
+        leave = [b for b in now if norm(b["t"]).strip() in ("salir ahora", "exit now")]
+        if leave:                                    # «Proyecto aún no creado · Cancelar / Salir ahora»: SALIR (con
+            s.click_box(leave[0], after=1.0)         # «Cancelar» el asistente se quedaba abierto y cada reintento fallaba)
+            continue
+        close = [b for b in now if norm(b["t"]).strip() in ("cancelar", "cerrar", "descartar cambios", "cancel", "close")]
         if close and not _sidebar(s, boxes):
             s.log("Imagen: cerrando una ventana que quedó abierta…")
             s.click_box(max(close, key=lambda b: b["y"]))
@@ -257,7 +287,8 @@ def _clear(s: Screen, timeout: float = 90) -> None:
 
 
 WIZARD = ("elige origen", "donde estan tus fotos", "nombra tu proyecto", "fotos seleccionadas", "herramientas seleccionadas",
-          "esto es lo que te espera", "descargar todas las ediciones", "tus fotos siguen")   # y la vista previa / descarga
+          "esto es lo que te espera", "descargar todas las ediciones", "tus fotos siguen",   # y la vista previa / descarga
+          "tu flujo de trabajo", "elige un tipo de fotografia", "proyecto aun no creado")    # (asistente de nov-2026)
 
 
 def _close_wizard(s: Screen, boxes=None) -> bool:
@@ -276,8 +307,8 @@ def _close_wizard(s: Screen, boxes=None) -> bool:
         if t:
             s.click(x + 0.703 * w, t[0]["y"] + t[0]["h"] / 2)
             time.sleep(1.0)
-    for b in s.ocr():                                      # «¿Descartar el proyecto?»
-        if norm(b["t"]).strip() in ("descartar", "si, descartar", "salir", "discard"):
+    for b in s.ocr():                                      # «¿Descartar el proyecto?» / «Proyecto aún no creado»
+        if norm(b["t"]).strip() in ("descartar", "si, descartar", "salir", "salir ahora", "discard", "exit now"):
             s.click_box(b, after=1.0)
             break
     return True
@@ -372,8 +403,8 @@ def _row_parts(s: Screen, row: dict, boxes):
 
 def _find_row(s: Screen, project: str, tries: int = 4):
     boxes: List[dict] = []
-    for _ in range(tries):
-        boxes = s.ocr()
+    for k in range(tries):
+        boxes = s.ocr(scale=2 if k % 2 else 1)            # (ampliada una vuelta sí y otra no: ver Screen.wait)
         r = _row(s, project, boxes)
         if r is not None:
             return r, boxes
@@ -411,28 +442,73 @@ PICK = ("elegir carpeta", "seleccionar carpeta", "select folder", "choose folder
 def _pick_folder(s: Screen, folder: Path) -> None:
     """Selector de carpetas de Windows: se escribe la ruta en «Carpeta:» y se pulsa su botón («Elegir carpeta» en
     Imagen, «Seleccionar carpeta» en Bridge)."""
-    t0 = time.time()
-    lab, btn = [], []
-    while time.time() - t0 < 25:
+    picker = lambda: [w for w in ws.windows(exe=s.exe)                                  # noqa: E731
+                      if any(k in w["title"].lower() for k in ("carpeta", "folder", "abrir", "examinar"))]
+    t0, k, again = time.time(), 0, False
+    lab, btn, boxes = [], [], []
+    while time.time() - t0 < 30:
         if s.should_stop():
             raise UIError("Cancelado.")
-        boxes = s.ocr()
+        boxes = s.ocr(scale=2 if k % 2 else 1)           # (ampliada una vuelta sí y otra no: ver Screen.wait)
+        k += 1
         w = s.window()
         lab = [b for b in boxes if norm(b["t"]).strip().rstrip(":") in ("carpeta", "folder")
                and b["y"] > w["rect"][1] + 0.6 * w["rect"][3]] if w else []
         btn = [b for b in boxes if norm(b["t"]).strip() in PICK and w and b["y"] > w["rect"][1] + 0.6 * w["rect"][3]]
         if lab and btn:
             break
+        if not again and time.time() - t0 > 10 and not picker():   # el clic en «Explorar» no llegó: otra vez
+            ex = [b for b in boxes if "explorar" in norm(b["t"])]
+            if ex:
+                s.log("   (el selector de carpetas no se abrió: pulso «Explorar» otra vez)")
+                s.click_box(max(ex, key=lambda q: q["y"]), after=1.5)
+            again = True
         time.sleep(0.4)
     else:
+        diag(s, "selector-de-carpetas", boxes)
         raise UIError("No se abrió el selector de carpetas.")
-    b = lab[0]
-    s.click(b["x"] + b["w"] + 6 * b["h"], b["y"] + b["h"] / 2)          # el campo, a la derecha del rótulo
-    time.sleep(0.3)
-    s.keys("ctrl+a")
-    s.type(str(folder))
-    time.sleep(0.5)
-    s.click_box(max(btn, key=lambda q: q["y"]), after=1.2)
+    for intento in range(2):
+        b = lab[0]
+        s.click(b["x"] + b["w"] + 6 * b["h"], b["y"] + b["h"] / 2)          # el campo, a la derecha del rótulo
+        time.sleep(0.3)
+        s.keys("ctrl+a")
+        s.type(str(folder))
+        time.sleep(0.5)
+        s.click_box(max(btn, key=lambda q: q["y"]), after=1.2)
+        t1 = time.time()
+        while picker() and time.time() - t1 < 6:         # ¿se cerró el selector? (si no, la ruta no entró)
+            time.sleep(0.4)
+        if not picker():
+            return
+        s.log("   (el selector de carpetas sigue abierto: escribo la ruta otra vez)")
+        boxes = s.ocr(scale=2)
+        lab = [q for q in boxes if norm(q["t"]).strip().rstrip(":") in ("carpeta", "folder")] or lab
+        btn = [q for q in boxes if norm(q["t"]).strip() in PICK] or btn
+    diag(s, "selector-no-acepta-ruta", boxes)
+    raise UIError(f"El selector de carpetas no aceptó la ruta «{folder}».")
+
+
+def _type_name(s: Screen, name_box: dict, dng_dir: Path, project: str) -> None:
+    """Escribe el nombre en «Nombra tu proyecto» y COMPRUEBA que quedó escrito. El clic va sobre el texto que ya trae
+    la casilla (el nombre de la carpeta, «2 DNGs»). 25-nov-2026: el clic calculado bajo el rótulo no cayó en la
+    casilla, Ctrl+A seleccionó toda la página y el proyecto se creó como «2 DNGs»; luego RawFlow no lo encontraba."""
+    h = name_box["h"]
+    below = lambda b: 0 < b["y"] - name_box["y"] < 4 * h and -2 * h < b["x"] - name_box["x"] < 30 * h   # noqa: E731
+    time.sleep(1.0)                                       # el diálogo termina de aparecer
+    for k in range(3):
+        boxes = s.ocr(scale=2 if k else 1)
+        cur = [b for b in boxes if below(b) and norm(b["t"]).strip() in (norm(dng_dir.name), norm(project))]
+        if cur:
+            s.click_box(cur[0], after=0.4)                # dentro de la casilla, sobre su texto
+        else:
+            s.click(name_box["x"] + 7 * h, name_box["y"] + 2.9 * h)
+            time.sleep(0.4)
+        s.keys("ctrl+a")
+        s.type(project)
+        time.sleep(0.8)
+        if any(norm(project)[:18] in norm(b["t"]) for b in s.ocr(scale=2) if below(b)):
+            return
+    raise UIError("No pude escribir el nombre del proyecto en Imagen.")
 
 
 def _create_project(s: Screen, dng_dir: Path, project: str, photo_type: str, pfile: Path) -> str:
@@ -459,11 +535,7 @@ def _create_project(s: Screen, dng_dir: Path, project: str, photo_type: str, pfi
     if m and int(m.group(1)) != n_dng:
         s.esc()
         raise UIError(f"Imagen ve {m.group(1)} fotos en la carpeta y hay {n_dng} DNG: no se crea el proyecto.")
-    s.click(name_box["x"] + 7 * name_box["h"], name_box["y"] + 2.9 * name_box["h"])     # el campo, bajo el rótulo
-    time.sleep(0.4)
-    s.keys("ctrl+a")
-    s.type(project)
-    time.sleep(0.8)
+    _type_name(s, name_box, dng_dir, project)
     for n in range(2, 8):                                 # si Imagen dice que el nombre ya existe: «… #2», «… #3»
         if not (s.find("ya existe") or s.find("already exists") or s.find("nombre en uso")):
             break
@@ -622,9 +694,19 @@ def _open_download_dialog(s: Screen, dng_dir: Path, project: str) -> None:
     row, boxes = _find_row(s, project)
     if not row:
         raise UIError(f"No encuentro el proyecto «{project}» en Imagen.")
-    _st, _n, buttons = _row_parts(s, row, boxes)
-    rev = [b for b in buttons if "revisar" in norm(b["t"]) or "ediciones" in norm(b["t"])]   # el OCR a veces lee «evisar…»
+    rev: List[dict] = []
+    for k in range(6):          # el botón es blanco sobre rojo: a tamaño real el OCR a veces no lo lee (25-nov-2026)
+        if k:
+            time.sleep(0.8)
+            row, boxes = _find_row(s, project, tries=2)
+            if not row:
+                continue
+        _st, _n, buttons = _row_parts(s, row, boxes)
+        rev = [b for b in buttons if "revisar" in norm(b["t"]) or "ediciones" in norm(b["t"])]   # a veces «evisar…»
+        if rev:
+            break
     if not rev:
+        diag(s, "sin-revisar-ediciones", boxes)
         raise UIError(f"El proyecto «{project}» aún no ofrece «Revisar Ediciones».")
     s.click_box(rev[0], after=1.2)
     b = s.wait("Descargar todas las ediciones", "Tus fotos siguen", "Descargar ediciones", timeout=20)

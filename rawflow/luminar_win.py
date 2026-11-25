@@ -360,6 +360,21 @@ def _settled(files: List[Path], most: float = 3.0) -> None:
         time.sleep(0.4)
 
 
+def _count(text: str, n: int) -> int:
+    """Cuántas fotos dice «N seleccionadas». El OCR a veces parte el número («41 1») o se come una cifra repetida
+    («411» → «41»): si lo leído es `n` con UNA cifra menos, cuenta como `n` (la exportación comprueba luego que
+    salgan las `n`)."""
+    import re
+    digits = "".join(re.findall(r"\d", text.split("eleccionad")[0]))
+    if not digits:
+        return 0
+    k = int(digits)
+    full = str(n)
+    if k < n and len(full) >= 3 and len(digits) == len(full) - 1 and any(full[:i] + full[i + 1:] == digits for i in range(len(full))):
+        return n
+    return k
+
+
 def _export(s, out: Path, n: int, log: Log, should_stop=lambda: False, progress=lambda f: None) -> int:
     """Exportar → «JPEG · 100 % de calidad» → carpeta `out`. Espera a que estén las `n` fotos enteras."""
     import re
@@ -369,11 +384,20 @@ def _export(s, out: Path, n: int, log: Log, should_stop=lambda: False, progress=
     for _ in range(3):
         _select_all(s)
         s.tap("Exportar", exact=True, timeout=15, region=(0.85, 0, 0.97, 0.06), after=1.5)
-        boxes = s.ocr()
-        sel = [b for b in boxes if "seleccionad" in iw.norm(b["t"])]
-        k = int(re.findall(r"\d+", sel[0]["t"])[0]) if sel and re.findall(r"\d+", sel[0]["t"]) else 0
+        k, t1, j, seen = 0, time.time(), 0, ""
+        while time.time() - t1 < max(20, n * 0.15):  # tras pegar a cientos de fotos el menú sale vacío o gris un rato
+            boxes = s.ocr(scale=2 if j % 2 else 1)
+            j += 1
+            for b in boxes:
+                if "seleccionad" in iw.norm(b["t"]):
+                    seen = b["t"]
+                    k = max(k, _count(b["t"], n))
+            if k >= n:
+                break
+            time.sleep(1)
         if k >= n:
             break
+        log(f"Luminar: el menú Exportar muestra {k} de {n} seleccionadas («{seen}»); reintento…")
         s.esc()
         time.sleep(1)
     else:

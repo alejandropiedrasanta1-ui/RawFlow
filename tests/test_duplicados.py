@@ -489,16 +489,16 @@ def memoria_con_dos_eventos():
 @caso
 def cerrar_apps_windows():
     """Al empezar un evento en Windows: cada app con ventana se cierra como su X; la que se queda en segundo plano sin
-    ventana (Claude, Chrome…) se termina con sus subprocesos; la que sigue con ventana (pregunta si guardar) se FUERZA
-    (decisión del usuario); Windows (explorer…), los ventiladores (FanControl, aunque tenga ventana), RawFlow y
-    RAWFLOW_NO_CERRAR no se tocan. Todo simulado: no cierra nada real."""
+    ventana (Chrome…) se termina con sus subprocesos; la que sigue con ventana (pregunta si guardar) se FUERZA
+    (decisión del usuario); Windows (explorer…), los ventiladores (FanControl, aunque tenga ventana), RawFlow, Claude
+    (25-nov-2026: el usuario lo quiere abierto para que vigile el evento) y RAWFLOW_NO_CERRAR no se tocan. Todo simulado: no cierra nada real."""
     if sys.platform != "win32":                       # (cierre de apps de Windows: en el Mac lo hace osascript)
         return
     from rawflow import pipeline as pl, winscreen as ws
     import psutil
-    vivos = {10: "Resolve.exe", 11: "claude.exe", 12: "claude.exe", 13: "Editor.exe", 14: "explorer.exe",
-             15: "Protegida.exe", 16: "FanControl.exe"}
-    con_ventana = {10, 11, 13, 14, 15, 16}
+    vivos = {10: "Resolve.exe", 11: "chrome.exe", 12: "chrome.exe", 13: "Editor.exe", 14: "explorer.exe",
+             15: "Protegida.exe", 16: "FanControl.exe", 17: "claude.exe"}
+    con_ventana = {10, 11, 13, 14, 15, 16, 17}
     hijos = {11: [12]}
     quiere_cerrar = {10: "sale", 11: "se esconde", 13: "pregunta"}
     terminados, cerradas_x = [], []
@@ -544,11 +544,11 @@ def cerrar_apps_windows():
         r = pl.quit_other_apps_windows(lambda m: None, wait=1, keep_extra=["Protegida.exe"])
     finally:
         ws.windows, ws.close_window, psutil.Process, psutil.wait_procs, pl.background_sweep, pl._own_tree = orig
-    assert sorted(cerradas_x) == ["Editor.exe", "Resolve.exe", "claude.exe"], cerradas_x   # ni explorer, ni protegida,
-    assert r == {"cerradas": ["Resolve.exe", "claude.exe"], "forzadas": ["Editor.exe"], "fondo": ["fondo"]}, r
+    assert sorted(cerradas_x) == ["Editor.exe", "Resolve.exe", "chrome.exe"], cerradas_x   # ni explorer, ni protegida,
+    assert r == {"cerradas": ["Resolve.exe", "chrome.exe"], "forzadas": ["Editor.exe"], "fondo": ["fondo"]}, r
     assert barrido, "después, todo lo de segundo plano"                                     # ni FanControl
-    assert sorted(terminados) == ["Editor.exe", "claude.exe", "claude.exe"], terminados    # forzada; Claude + hijo
-    assert 14 in vivos and 15 in vivos and 16 in vivos                                      # Windows/protegida/ventiladores
+    assert sorted(terminados) == ["Editor.exe", "chrome.exe", "chrome.exe"], terminados    # forzada; Chrome + hijo
+    assert 14 in vivos and 15 in vivos and 16 in vivos and 17 in vivos                      # Windows/protegida/ventiladores/Claude
 
 
 @caso
@@ -578,7 +578,10 @@ def banco_descarte():
     están revisadas (DSC02626 sin flash, DSC02628 ojos cerrados; las demás, repetidas de la misma pose)."""
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "calibrar"))
     import banco
-    ref = {"20nov_480": 45, "boda14nov_1604": 71, "jutiapa_597": 103, "xv15nov_376_win": 49, "xv8nov_516_win": 102}
+    # 25-nov-2026: + ojos cerrados del todo a solas, + cara movida/desenfocada, + quemada sin caras (pedido del usuario).
+    # Revisadas a ojo con recortes de cada cara (boda 14 nov: las 10 «movidas» y las 10 de ojos que la otra IA daba
+    # por buenas lo están de verdad; XV 15/8 nov: 6 de 8 ojos cerrados, 2 mirando abajo con los ojos casi cerrados).
+    ref = {"20nov_480": 58, "boda14nov_1604": 129, "jutiapa_597": 114, "xv15nov_376_win": 54, "xv8nov_516_win": 105}
     vistas = {}
     for f in sorted(banco.DATOS.glob("*.jsonl")):
         e = banco.evaluar(banco.cargar(f))
@@ -587,7 +590,9 @@ def banco_descarte():
     assert set(vistas) == set(ref), sorted(vistas)
     b = vistas["boda14nov_1604"]["buenas"]
     sueltas = {k for k, v in b.items() if not v.startswith("repetida")}
-    assert sueltas == {"DSC02626.ARW", "DSC02628.ARW"} and len(b) == 14, sorted(b)
+    nuevas = {k for k in sueltas if b[k].startswith(("ojos cerrados:", "ojos cerrados (una", "movida o desenfocada"))}
+    assert sueltas - nuevas == {"DSC02626.ARW", "DSC02628.ARW"}, sorted(sueltas - nuevas)
+    assert len(nuevas) == 20, sorted(nuevas)
 
 
 @caso
@@ -1215,7 +1220,42 @@ def seleccion_ia_en_windows():
     assert S.engine() == ("win" if core.SYSTEM == "Windows" else S.engine())
 
 
+@caso
+def luminar_lee_las_seleccionadas():
+    """Menú Exportar de Luminar con 411 fotos (25-nov-2026): el OCR leía «41 seleccionadas» y el paso 6 fallaba 3
+    veces. Una cifra comida o el número partido cuentan como n (solo con 3+ cifras); otro número, no."""
+    from rawflow.luminar_win import _count
+    assert [_count(t, 411) for t in ("411 seleccionadas", "41 seleccionadas", "41 1 seleccionadas",
+                                     "0 seleccionadas", "Ninguna seleccionada", "12 seleccionadas")] == [411, 411, 411, 0, 0, 12]
+    assert _count("4 seleccionadas", 41) == 4 and _count("1.234 seleccionadas", 1234) == 1234
+
+
 # ---------------------------------------------------------------- ejecutar
+@caso
+def barrido_respeta_claude_y_sus_herramientas():
+    """El barrido de segundo plano no cierra Claude NI lo que cuelga de él (node, pwsh, python…): 25-nov-2026 las
+    cerraba y Claude se quedaba sin poder vigilar el evento. Lo demás (Adobe, un python suelto) sí. Simulado."""
+    from rawflow import pipeline as pl
+    import psutil
+    yo = psutil.Process().username()
+    tabla = {100: ("claude.exe", r"C:\Apps\Claude\claude.exe", 1), 101: ("node.exe", r"C:\Apps\node\node.exe", 100),
+             102: ("pwsh.exe", r"C:\PS\pwsh.exe", 101), 103: ("python.exe", r"C:\Py\python.exe", 102),
+             200: ("python.exe", r"C:\Py\python.exe", 1), 201: ("CoreSync.exe", r"C:\Adobe\CoreSync.exe", 1)}
+
+    class P:
+        def __init__(self, pid):
+            n, e, pp = tabla[pid]
+            self.pid, self.info = pid, {"pid": pid, "ppid": pp, "name": n, "exe": e, "username": yo}
+    vistos = []
+    orig = (psutil.process_iter, pl._own_tree)
+    psutil.process_iter, pl._own_tree = (lambda attrs=None: [P(k) for k in tabla]), (lambda: set())
+    try:
+        pl.background_sweep(lambda m: None, filtro=lambda p: vistos.append(p.pid) or False)
+    finally:
+        psutil.process_iter, pl._own_tree = orig
+    assert sorted(vistos) == [200, 201], vistos
+
+
 def main() -> int:
     ok = 0
     for fn in RESULTS:

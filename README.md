@@ -273,6 +273,40 @@ Enchufado y con el Mac fresco (base con ventilador, superficie dura, tapa abiert
 Si el preajuste usa algo que el motor directo no reproduce igual (máscaras, búsqueda de caras, ajustes por
 género, LUT, plugins demo o no instalados), RawFlow usa la ventana de Arams como antes (`arams_ui.py`).
 
+## Imagen abre en «Inicio» (Windows, 4.25)
+
+La app de Imagen ahora abre en su pantalla «Inicio» y el OCR de Windows a veces no lee «Proyectos» en la barra
+lateral: el paso 4 se paraba con «Imagen no muestra su pantalla principal («Proyectos»)». Ahora, si no lo lee, lo
+encuentra por su sitio (entre «Perfiles de IA» y «Social Spotlight»).
+
+- La letra pequeña («Bodas», 12 px) y la blanca sobre rojo («Explorar», «Siguiente») a veces no se leían: cada espera
+  alterna ahora la lectura normal con una ampliada ×2.
+- El asistente nuevo, al cerrarlo, pregunta «Proyecto aún no creado · Cancelar / Salir ahora». RawFlow pulsaba
+  «Cancelar», el asistente se quedaba abierto y cada reintento fallaba («No apareció «Explorar»»): ahora pulsa
+  «Salir ahora».
+- Cerrar las apps de fondo: un proceso que no deja mirarse (ASUS DriverHub) ya no corta el barrido entero.
+- Claude se queda abierto (y lo que usa por dentro) al empezar un evento, para poder vigilarlo y arreglar fallos.
+- El nombre del proyecto se escribe clicando dentro de su casilla y se comprueba (una vez se creó como «2 DNGs»).
+- Cada vez que algo no aparece en pantalla se guarda una captura en «diagnostico» y el registro dice cuál es.
+
+## Luminar con cientos de fotos (4.25)
+
+Con 411 fotos, el paso 6 fallaba tres veces («Luminar no seleccionó las 411 fotos para exportar»): tras pegar el
+ajuste, el menú Exportar sale vacío o gris unos segundos, y el OCR leía «41 seleccionadas». Ahora espera al menú
+(hasta 0,15 s por foto, mín. 20 s, leyendo también ×2), cuenta como n un número con una cifra comida o partido
+(solo con 3+ cifras; la exportación comprueba luego que salen las n) y el registro dice lo que leyó.
+
+## Selección IA más estricta (4.25)
+
+Pedido del usuario: «dejó tomas quemadas, con ojos cerrados o borrosas». Ahora se apartan también A SOLAS (sin otra
+toma igual con la que comparar):
+
+- **ojos cerrados del todo** (los dos ojos; a medio cerrar o sonriendo, no; dos caras pegadas —beso, baile—, no);
+- **movida o desenfocada**: ninguna cara nítida (por debajo del 2,8 % de la nitidez mediana de las caras del evento);
+- **quemada**: sin ninguna cara y casi toda blanca (con la cara bien expuesta, el blanco es el cielo y se queda).
+
+Calibrado mirando cada cara ampliada en 6 eventos reales. Lo apartado sigue en «Fotos malas» y se recupera con un clic.
+
 ## Interfaz más pulida y tiempos reales en Windows (4.24)
 
 - Las pastillas de los pasos ya no cortan el texto con la ventana estrecha, y cada paso tiene su icono (Luminar lo

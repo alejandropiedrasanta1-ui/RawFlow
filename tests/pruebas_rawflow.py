@@ -1588,12 +1588,18 @@ def p57():
     assert S.decide(rows) == {"A2.NEF": "ojos cerrados (en A1, la toma de al lado, está bien)"}, S.decide(rows)
     abajo = [a1, _foto("A2.NEF", 0.4, 0.20, caras=[_cara(ojos=(0.06, 0.08), pitch=0.45)])]    # mira abajo
     assert S.decide(abajo) == {}, S.decide(abajo)
+    # 25-nov-2026 (el usuario: «dejó tomas con ojos cerrados»): cerrados DEL TODO se apartan aunque no haya otra toma
+    solo = "ojos cerrados: no hay otra toma igual con los ojos abiertos"
     otro = [a1, _foto("A2.NEF", 0.4, 0.40, caras=[_cara(ojos=(0.06, 0.08))])]        # otro momento (no casi igual)
-    assert S.decide(otro) == {}, S.decide(otro)
+    assert S.decide(otro) == {"A2.NEF": solo}, S.decide(otro)
     lejos = [a1, _foto("A2.NEF", 9.0, 0.20, caras=[_cara(ojos=(0.06, 0.08))])]       # 9 s después: otra toma
-    assert S.decide(lejos) == {}
+    assert S.decide(lejos) == {"A2.NEF": solo}
     dos = [_foto("B1.NEF", 0, caras=[_cara(ojos=(0.06, 0.07))]), _foto("B2.NEF", 0.3, 0.20, caras=[_cara(ojos=(0.05, 0.08))])]
-    assert S.decide(dos) == {}                                                        # las dos igual: ninguna
+    assert S.decide(dos) == {"B1.NEF": solo, "B2.NEF": solo}                          # las dos con los ojos cerrados
+    medio = [a1, _foto("A2.NEF", 9.0, 0.20, caras=[_cara(ojos=(0.13, 0.15))])]       # a medio cerrar / sonriendo: no
+    assert S.decide(medio) == {}
+    beso = [a1, _foto("K1.NEF", 9.0, 0.40, caras=[_cara(x=0.40, ojos=(0.05, 0.06)), _cara(x=0.47, ojos=(0.06, 0.05))])]
+    assert S.decide(beso) == {}, S.decide(beso)                                       # dos caras pegadas: a propósito
     noche = [_foto("N1.NEF", 0, lum=30, negro=60, caras=[_cara(lum=140)]),            # fondo negro, cara bien
              _foto("N2.NEF", 0.5, 0.20, lum=31, negro=58, caras=[_cara(lum=135)])]
     assert S.decide(noche) == {}
@@ -1878,6 +1884,24 @@ def p65():
     n = S.rescue(rows, req, lambda name: base / name, str(fake))
     assert n == 1 and len(k["caras"]) == 2 and len(k["ocultas"]) == 1, (n, k["caras"], k.get("ocultas"))
     assert _json.dumps(rows)                                                    # todo sigue siendo JSON
+
+
+@prueba("Imagen (Windows) abre en «Inicio» y el OCR no lee «Proyectos» en la barra lateral (24-nov-2026, evento de "
+        "1.119 fotos parado): se encuentra igual por su sitio, entre «Perfiles de IA» y «Social Spotlight»")
+def p69():
+    from types import SimpleNamespace
+    from rawflow import imagen_win as iw
+    s = SimpleNamespace(rect=(758, 156, 1923, 1128))
+    s.inside = lambda b, r: iw.Screen.inside(s, b, r)
+    caja = lambda t, x, y, w=60, h=18: {"t": t, "x": x, "y": y, "w": w, "h": h}
+    leido = [caja("Inicio", 795, 304), caja("Perfiles de", 772, 417, 80), caja("IA", 806, 436, 20),
+             caja("Social", 790, 660), caja("Spotlight", 778, 679, 70), caja("Tienda de", 772, 781, 70),
+             caja("Proyectos activos (13)", 880, 700, 230), caja("Crear proyecto", 970, 945, 120)]
+    b = iw._sidebar(s, leido)
+    assert b is not None and 520 < b["y"] + b["h"] / 2 < 590 and 760 < b["x"] < 820, b   # el botón «Proyectos»
+    assert iw._sidebar(s, [caja("Proyectos", 790, 540)])["y"] == 540                     # leído: se usa tal cual
+    assert iw._sidebar(s, [caja("Proyectos activos (13)", 880, 700, 230)]) is None       # el título de la lista no
+    assert iw._sidebar(s, [caja("Perfiles de", 772, 417, 80)]) is None                   # sin el de abajo, no adivina
 
 
 def main() -> int:

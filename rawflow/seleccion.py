@@ -209,6 +209,46 @@ def _soft_bad(r: dict, nit_med: float = 0.0) -> str:
     return ""
 
 
+# Defectos a solas (25-nov-2026, el usuario: «dejó tomas quemadas, con ojos cerrados o borrosas»). Calibrado mirando
+# las 411 buenas del evento «24 nov 2026 - Evento 1» (recortes de cada cara): todas las que marcan estas cifras lo eran.
+BURNT = 40.0             # % del cuadro blanco del todo y la imagen entera muy clara (luz media ≥ BURNT_LUM)…
+BURNT_LUM = 210
+BURNT_ANY = 55.0         # …o este % aunque no sea tan clara. Solo SIN caras: con la cara bien expuesta lo blanco es el
+#                          cielo nublado o el mantel (XV 8 nov: retratos buenos con 35-54 % de cielo blanco)
+BLUR_FACE_REL = 0.028    # la cara más nítida por debajo del 2,8 % de la mediana del evento: movida o desenfocada
+#                          (caras nítidas pero de poco contraste con poca luz dan 0,031-0,043: boda 14 nov, revisadas)
+BLUR_FACE_PX = 60        # (caras medidas a ≥ 60 px: más pequeñas no se juzgan)
+EYES_SHUT = 0.11         # los DOS ojos por debajo de esto: cerrados del todo (a medio cerrar o sonriendo, no)
+DEFECT_MAX_SHARE = 0.12  # si saltan en más del 12 % del evento, algo no cuadra con esa cámara: no se aparta ninguna
+
+
+def _hugging(fs: List[dict]) -> bool:
+    """¿Dos caras pegadas (beso, abrazo, baile)? Ahí los ojos cerrados son a propósito."""
+    for i, a in enumerate(fs):
+        for b in fs[i + 1:]:
+            ax, ay, bx, by = a["x"] + a["w"] / 2, a["y"] + a["h"] / 2, b["x"] + b["w"] / 2, b["y"] + b["h"] / 2
+            if abs(ax - bx) < 1.3 * max(a["w"], b["w"]) and abs(ay - by) < 1.3 * max(a["h"], b["h"]):
+                return True
+    return False
+
+
+def _defect(r: dict, face_med: float = 0.0) -> str:
+    """Defecto claro aunque no haya otra toma igual con la que comparar (con tope: ver DEFECT_MAX_SHARE)."""
+    q, lum = float(r.get("quemado", 0) or 0), float(r.get("lum", 0) or 0)
+    fs = _main_faces(r)
+    if not fs and ((q >= BURNT and lum >= BURNT_LUM) or q >= BURNT_ANY):
+        return f"quemada: {q:.0f} % de la foto blanco del todo, sin detalle"
+    if fs and face_med > 0:
+        nit = _sharp(r)
+        if max(f.get("px", 0) for f in fs) >= BLUR_FACE_PX and 0 <= nit < BLUR_FACE_REL * face_med:
+            return "movida o desenfocada: ninguna cara está nítida"
+    shut = [f for f in fs if _measurable(f) and f["ojoI"] < EYES_SHUT and f["ojoD"] < EYES_SHUT]
+    if shut and not _hugging(fs):
+        return ("ojos cerrados" + (" (una persona del grupo)" if len(fs) > 1 else "")
+                + ": no hay otra toma igual con los ojos abiertos")
+    return ""
+
+
 def bursts(rows: List[dict]) -> List[List[int]]:
     """Grupos de tomas seguidas casi iguales (ráfagas), por hora de la cámara y parecido."""
     groups: List[List[int]] = []
@@ -575,7 +615,15 @@ def decide(rows: List[dict]) -> Dict[str, str]:
     soft = {r["foto"]: why for r in ok_rows if r["foto"] not in accidental and (why := _soft_bad(r, nit_med))}
     if len(soft) > max(3, int(SOFT_MAX_SHARE * n)):     # tantas «a solas» = algo raro con esa cámara: no
         soft = {}
-    lone = {**accidental, **soft}
+    fn = sorted(_sharp(r) for r in ok_rows if _main_faces(r) and _sharp(r) > 0)
+    face_med = fn[len(fn) // 2] if len(fn) >= 20 else 0.0
+    defects = {r["foto"]: why for r in ok_rows
+               if r["foto"] not in accidental and r["foto"] not in soft and (why := _defect(r, face_med))}
+    if len(defects) > max(3, int(DEFECT_MAX_SHARE * n)):
+        defects = {}
+    shut = {k: v for k, v in defects.items() if v.startswith("ojos cerrados")}   # al final: si hay una toma gemela,
+    defects = {k: v for k, v in defects.items() if k not in shut}                # su motivo («en A1… está bien») vale más
+    lone = {**accidental, **soft, **defects}
     repes = _repeats(rows, lone)
     if len(repes) > max(10, DUP_MAX_SHARE * n):          # más de la mitad repetida: solo las clavadas
         repes = _repeats(rows, lone, DUP_STRICT)
@@ -593,7 +641,8 @@ def decide(rows: List[dict]) -> Dict[str, str]:
                 comp[x["foto"]] = f"{why} (en {Path(y['foto']).stem}, la toma de al lado, está bien)"
     if len(comp) > max(3, int(MAX_SHARE * n)):           # demasiadas por comparación: algo no cuadra (p. ej. una
         comp = {}                                        # cámara rara): esas no
-    return {**comp, **repes, **lone}
+    out = {**comp, **repes, **lone}
+    return {**{k: v for k, v in shut.items() if k not in out}, **out}
 
 
 KINDS = (("repetida", "repetida", "repetidas"), ("fallida", "fallida", "fallidas"),

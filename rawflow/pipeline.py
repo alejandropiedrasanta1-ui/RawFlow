@@ -217,7 +217,8 @@ _KEEP_WIN = {"explorer.exe", "shellexperiencehost.exe", "startmenuexperiencehost
 # 100 % durante horas, el equipo podría calentarse) y el antivirus.
 _KEEP_BG_WORDS = ("fancontrol", "fan control", "speedfan", "argus", "icue", "nzxt", "liquidctl", "aquasuite",
                   "defender", "securityhealth", "antivirus", "avast", "avg", "eset", "kaspersky", "norton", "mcafee",
-                  "bitdefender", "malwarebytes", "sophos", "trend micro")
+                  "bitdefender", "malwarebytes", "sophos", "trend micro",
+                  "claude")          # 25-nov-2026, pedido del usuario: Claude abierto para vigilar y arreglar el evento
 
 
 def windows_apps_to_close(keep_extra=()) -> dict:
@@ -249,7 +250,10 @@ def _kill_tree(p) -> None:
             q.terminate()
         except psutil.Error:
             pass
-    _, alive = psutil.wait_procs(tree, timeout=5)
+    try:
+        _, alive = psutil.wait_procs(tree, timeout=5)
+    except psutil.Error:                  # uno no deja mirarse (acceso denegado): forzar a todos
+        alive = tree
     for q in alive:
         try:
             q.kill()
@@ -339,13 +343,30 @@ def background_sweep(log=lambda s: None, keep_extra=(), protected=(), filtro=Non
         me = psutil.Process().username()
     except psutil.Error:
         return []
+    procs = list(psutil.process_iter(["pid", "ppid", "name", "exe", "username"]))
+    info = {p.pid: p.info for p in procs}
+
+    def kept(i) -> bool:
+        low = ((i.get("name") or "") + " " + (i.get("exe") or "")).lower()
+        return (i.get("name") or "").lower() in keep or any(w in low for w in _KEEP_BG_WORDS)
+
+    def under_kept(pid) -> bool:
+        """¿Cuelga de algo que se queda (Claude)? Sus herramientas (node, pwsh, python, uv…) también se quedan:
+        25-nov-2026, el barrido las cerraba y Claude se quedaba sin poder vigilar el evento."""
+        seen = set()
+        i = info.get(pid)
+        while i and i.get("ppid") and i["ppid"] not in seen and len(seen) < 25:
+            seen.add(i["ppid"])
+            i = info.get(i["ppid"])
+            if i and kept(i):
+                return True
+        return False
     targets = []
-    for p in psutil.process_iter(["pid", "name", "exe", "username"]):
+    for p in procs:
         try:
             name, exe = (p.info["name"] or ""), (p.info["exe"] or "")
-            low = (name + " " + exe).lower()
             if (p.info["username"] != me or not exe or exe.lower().startswith(sysroot) or p.pid in protected
-                    or name.lower() in keep or any(w in low for w in _KEEP_BG_WORDS)):
+                    or kept(p.info) or under_kept(p.pid)):
                 continue
             if filtro is not None and not filtro(p):
                 continue
@@ -361,13 +382,32 @@ def background_sweep(log=lambda s: None, keep_extra=(), protected=(), filtro=Non
             p.terminate()
         except psutil.Error:
             pass
-    _, alive = psutil.wait_procs(targets, timeout=4)
+    def wait(procs, timeout):
+        """Como psutil.wait_procs, pero un proceso que no deja mirarse («ASUS DriverHub»: acceso denegado) cuenta
+        como vivo en vez de cortar el barrido entero (24-nov-2026: la excepción mataba el hilo de cierre)."""
+        t_end = time.monotonic() + timeout
+        alive = list(procs)
+        while alive and time.monotonic() < t_end:
+            still = []
+            for p in alive:
+                try:
+                    if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
+                        still.append(p)
+                except psutil.NoSuchProcess:
+                    pass
+                except psutil.Error:
+                    still.append(p)
+            alive = still
+            if alive:
+                time.sleep(0.2)
+        return alive
+    alive = wait(targets, 4)
     for p in alive:
         try:
             p.kill()
         except psutil.Error:
             pass
-    _, alive = psutil.wait_procs(alive, timeout=2)
+    alive = wait(alive, 2)
     names = sorted({(p.info.get("name") or "?") for p in targets if p not in alive}, key=str.lower)
     if names:
         log(f"Cerrados {len(targets) - len(alive)} procesos en segundo plano (≈{ram / 2**30:.1f} GB de RAM): "
