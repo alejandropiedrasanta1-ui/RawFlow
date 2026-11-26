@@ -29,6 +29,23 @@ from .widgets import (ActivityView, DriveCard, ElidedLabel, EmptyDrives, PathLab
                       tint_titlebar)
 
 APP_NAME = "RawFlow"
+# Pruebas (RAWFLOW_SIN_APPS=1): registro y ajustes en una carpeta temporal propia de esa ejecución, nunca en los de
+# verdad (26-nov-2026: al compilar, las pruebas escribían en registro.log y cambiaban la pantalla donde se abre).
+_TEST_DIR = Path(__import__("tempfile").gettempdir()) / f"RawFlow-pruebas-{os.getpid()}"
+
+
+# Espacio que ocupa un evento entero frente a sus RAW. Medido (26-nov-2026, «25 nov 2026»): 31,4 GB de RAW → 99,3 GB
+# de evento (3,17×: originales 1,1× · DNG 1,3× · Imagen 0,2× · finales 0,2× · Luminar 0,3× · videos), + margen.
+SPACE_FACTOR = 3.3
+SPACE_MARGIN = 10 * 1024 ** 3
+
+
+def user_settings() -> QSettings:
+    """Los ajustes de RawFlow (registro de Windows / preferencias del Mac); en pruebas, un .ini temporal."""
+    if os.environ.get("RAWFLOW_SIN_APPS") == "1":
+        _TEST_DIR.mkdir(parents=True, exist_ok=True)
+        return QSettings(str(_TEST_DIR / "ajustes.ini"), QSettings.Format.IniFormat)
+    return QSettings(APP_NAME, APP_NAME)
 IMAGEN_APP = Path("/Applications/ImagenAI.app")
 ARAMS_APP = Path("/Applications/Retouch4me Arams.app")
 
@@ -222,6 +239,70 @@ def _qc(c: str) -> QColor:
         q.setAlphaF(0.0)
         return q
     return QColor(c)
+
+
+class BackupWorker(QThread):
+    """Copia carpetas enteras a `dest` (cada una con su nombre), en segundo plano. Lo que ya está con el mismo tamaño
+    se salta (si se repite, solo copia lo que falte); cada archivo se escribe aparte y se renombra al acabar."""
+    done = Signal(bool, str)
+
+    def __init__(self, srcs, dest: Path, parent=None):
+        super().__init__(parent)
+        self.srcs, self.dest = list(srcs), Path(dest)
+        self._stop = False
+
+    def stop(self):
+        self._stop = True                  # (al cerrar RawFlow: corta YA, también a mitad de un video; lo copiado vale)
+
+    def _copy(self, f: Path, tmp: Path) -> bool:
+        """Copia por trozos para poder cortar a mitad de un archivo grande (un video de 500 MB a un disco lento
+        tardaba más que lo que RawFlow espera al cerrarse). False si se cortó."""
+        with open(f, "rb") as a, open(tmp, "wb") as b:
+            while True:
+                if self._stop:
+                    return False
+                chunk = a.read(8 << 20)
+                if not chunk:
+                    return True
+                b.write(chunk)
+
+    def run(self):
+        n = skipped = 0
+        size = 0
+        tmp = None
+        try:
+            for src in self.srcs:
+                for f in sorted(p for p in Path(src).rglob("*") if p.is_file() and not p.name.startswith(".")):
+                    if self._stop:
+                        return
+                    out = self.dest / src.name / f.relative_to(src)
+                    st = f.stat()
+                    if out.exists() and out.stat().st_size == st.st_size:
+                        skipped += 1
+                        continue
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = out.with_name(out.name + ".copiando")
+                    if not self._copy(f, tmp):
+                        tmp.unlink(missing_ok=True)
+                        return
+                    if tmp.stat().st_size != st.st_size:
+                        raise OSError(f"{f.name} llegó incompleta")
+                    os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+                    os.replace(tmp, out)
+                    tmp = None
+                    n += 1
+                    size += st.st_size
+        except Exception as e:  # noqa: BLE001
+            if tmp is not None:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self.done.emit(False, f"La copia de seguridad en «{self.dest}» no se completó ({e}). Las fotos y los "
+                                  "videos siguen completos en la carpeta del evento.")
+            return
+        self.done.emit(True, f"Copia de seguridad hecha en «{self.dest}»: {n:,} archivos ({core.human_size(size)})"
+                       + (f", {skipped:,} ya estaban" if skipped else "") + ".")
 
 
 def _inside(path, root) -> bool:
@@ -584,7 +665,7 @@ class MainWindow(QMainWindow):
         self.resize(1180, 800)
         self.setMinimumSize(1060, 720)
 
-        self.settings = QSettings(APP_NAME, APP_NAME)
+        self.settings = user_settings()
         self.base_dir = self.settings.value("dest_base_v2", core.default_base_dir())
         apps = [a for a in core.find_dxo_apps() if core.is_pureraw(a)] or core.find_dxo_apps()
         saved = self.settings.value("dxo_path", "")
@@ -609,6 +690,7 @@ class MainWindow(QMainWindow):
         self.scanners: Dict[str, ScanWorker] = {}
         self.hidden: Dict[str, DriveCard] = {}     # memorias revisándose que aún no enseñan RAW (no se ven)
         self.no_raw: set = set()                   # memorias puestas sin ningún RAW (no se enseñan)
+        self.backups: set = set()                  # copias de seguridad en marcha (BackupWorker)
         self.pipe: Pipeline | None = None
         self.last_event: Path | None = None
         self.failed_step = 0
@@ -837,6 +919,29 @@ class MainWindow(QMainWindow):
         self.tree = label("", "faint")              # las carpetas que se crean dentro
         self.tree.setContentsMargins(2 + 17 + 8, 0, 0, 0)   # alineado con la ruta: margen + icono + separación
         el.addWidget(self.tree)
+        brow = QHBoxLayout()                        # copia de seguridad de lo que se entrega (26-nov-2026)
+        brow.setSpacing(8)
+        brow.setContentsMargins(2, 0, 0, 0)
+        bic = QLabel()
+        bic.setFixedWidth(17)
+        bic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pm = icon_pixmap_named("ph.copy", T.FAINT, 15)
+        if pm is not None:
+            bic.setPixmap(pm)
+        else:
+            bic.setText("⧉")
+        brow.addWidget(bic)
+        self.backup_label = label("", "faint")
+        brow.addWidget(self.backup_label, 1)
+        self.backup_btn = QPushButton("Copia", objectName="ghost")
+        set_button_icon(self.backup_btn, "ph.copy", T.MUTED)
+        self.backup_btn.setToolTip("Al terminar cada evento, copiar las fotos finales y los videos a otra carpeta "
+                                   "(un disco externo, OneDrive, Google Drive…)")
+        self.backup_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.backup_btn.clicked.connect(self._choose_backup)
+        brow.addWidget(self.backup_btn)
+        el.addLayout(brow)
+        self._update_backup_label()
         right.addWidget(ev)
 
         # --- resumen
@@ -1336,7 +1441,16 @@ class MainWindow(QMainWindow):
         anim.slide_out(card, gone)
         self.results.pop(key, None)
 
+    def _stale(self, key) -> bool:
+        """¿Aviso de una revisión VIEJA? (memoria quitada y vuelta a poner mientras se revisaba: la revisión anterior,
+        ya parada, aún mandaba sus avisos y podía dar la memoria por «sin RAW» o quitar de la lista la nueva).
+        Revisión 26-nov-2026."""
+        w = self.sender()
+        return isinstance(w, ScanWorker) and self.scanners.get(key) is not w
+
     def _scan_progress(self, key, visited, found):
+        if self._stale(key):
+            return
         if key in self.hidden and found > 0:
             self._reveal(key)
         if key in self.cards:
@@ -1344,6 +1458,8 @@ class MainWindow(QMainWindow):
 
     def _scan_counted(self, key, files):
         """Ya se sabe cuántas fotos trae: la tarjeta lo enseña (con su animación) sin esperar a lo de los eventos."""
+        if self._stale(key):
+            return
         if key in self.hidden:
             if not files:                          # ni un RAW: esta memoria no es de fotos, no aparece
                 self._forget_hidden(key, no_raw=True)
@@ -1354,9 +1470,11 @@ class MainWindow(QMainWindow):
             self.cards[key].set_done(len(files), res.total_bytes, [f for f, _ in res.by_format().most_common()])
 
     def _scan_done(self, key, files):
+        if self._stale(key):
+            return
+        if key in self.hidden:                     # (si no llegó «counted»; ANTES de quitarla de la lista: si no,
+            self._scan_counted(key, files)         # _stale la tomaría por una revisión vieja)
         self.scanners.pop(key, None)
-        if key in self.hidden:                     # (si no llegó «counted»)
-            self._scan_counted(key, files)
         if key not in self.cards:
             return
         self.results[key] = files
@@ -1641,7 +1759,8 @@ class MainWindow(QMainWindow):
         self.dest_label.setText(str(d))
         self.tree.setText("Dentro:   " + "   ·   ".join(
             (core.RAW_SUBFOLDER, core.OUTPUT_SUBFOLDER, IMAGEN_DIR if STEP_IMG not in self.steps_off else JPEG_SIN_DIR,
-             FINAL_DIR, PRES_DIR)))
+             FINAL_DIR) + ((core.LUMINAR_SUBFOLDER,) if core.STEP_LUM not in self.steps_off else ())   # (faltaba)
+            + ((PRES_DIR,) if STEP_PRES not in self.steps_off else ())))
 
     def _choose_base(self):
         d = QFileDialog.getExistingDirectory(self, "¿Dónde crear la carpeta del evento?", self.base_dir)
@@ -1649,6 +1768,64 @@ class MainWindow(QMainWindow):
             self.base_dir = d
             self.settings.setValue("dest_base_v2", d)
             self._update_dest()
+
+    # ------------------------------------------------------------ copia de seguridad de lo que se entrega
+    def _backup_dir(self) -> str:
+        return str(self.settings.value("copia_destino", "") or "")
+
+    def _update_backup_label(self):
+        d = self._backup_dir()
+        self.backup_label.setText(f"Copia de seguridad:  {d}" if d else
+                                  "Copia de seguridad: desactivada (pulsa «Copia» para elegir dónde)")
+
+    def _choose_backup(self):
+        d = self._backup_dir()
+        if d:
+            box = QMessageBox(self)
+            box.setWindowTitle(APP_NAME)
+            box.setText(f"Al terminar cada evento, sus fotos finales y sus videos se copian a:\n\n{d}")
+            cambiar = box.addButton("Cambiar carpeta", QMessageBox.ButtonRole.AcceptRole)
+            quitar = box.addButton("Quitar la copia", QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton("Cerrar", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is quitar:
+                self.settings.setValue("copia_destino", "")
+                self._update_backup_label()
+                return
+            if box.clickedButton() is not cambiar:
+                return
+        n = QFileDialog.getExistingDirectory(self, "¿Dónde guardar la copia de seguridad de cada evento?",
+                                             d or str(Path.home()))
+        if n:
+            if _inside(Path(n), self.base_dir) or _inside(Path(self.base_dir), n):
+                QMessageBox.warning(self, APP_NAME, "La copia tiene que ir a otra carpeta que no sea la de los "
+                                    "eventos (mejor otro disco).")
+                return
+            self.settings.setValue("copia_destino", n)
+            self._update_backup_label()
+
+    def _start_backup(self, ev: Path):
+        """Evento terminado bien: copia en segundo plano lo que se entrega (fotos finales —las de Luminar si las hay—
+        y los videos) a <copia>/<evento>/. No para nada ni retrasa el siguiente evento."""
+        d = self._backup_dir()
+        if not d:
+            return
+        from .pipeline import deliver_dir
+        srcs = [deliver_dir(ev, self.steps_off), ev / PRES_DIR]
+        w = BackupWorker([s for s in srcs if s.is_dir()], Path(d) / ev.name, self)
+        w.done.connect(self._backup_done)
+        self.backups.add(w)                        # (todas: con autoejecutar puede haber dos copiando a la vez)
+        w.finished.connect(lambda w=w: (self.backups.discard(w), w.deleteLater()))
+        self._log(f"Copia de seguridad de «{ev.name}» → {Path(d) / ev.name}…")
+        w.start()
+
+    @Slot(bool, str)
+    def _backup_done(self, ok: bool, msg: str):
+        self._log(("✓ " if ok else "⚠ ") + msg)
+        if not (self.pipe and self.pipe.isRunning()):
+            self.status.setText(("✓ " if ok else "⚠ ") + msg)
+        if not ok:
+            self._notify_done(False, "Copia de seguridad", msg)
 
     # ------------------------------------------------------------ arrastrar carpetas y fotos (sin excepción)
     def _overlay(self, on: bool):
@@ -1870,11 +2047,19 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, f"No se puede crear la carpeta del evento en:\n\n{self.base_dir}\n\n"
                                 "Ese disco no está conectado. Conéctalo, o pulsa «Cambiar» y elige otro sitio.")
             return
-        if free < need * 3.2:              # RAW + DNG (~1,8×) + JPEG
-            r = QMessageBox.question(self, APP_NAME,
-                                     f"Puede faltar espacio: necesitas ~{core.human_size(need * 3.2)} y quedan "
-                                     f"{core.human_size(free)}. ¿Continuar?")
+        want = need * SPACE_FACTOR + SPACE_MARGIN
+        if free < want:
+            self._stop_countdown()         # (con autoejecutar: no arranca sola un evento que se quedaría sin espacio)
+            drive = str(probe.anchor or probe)
+            r = QMessageBox.question(
+                self, APP_NAME,
+                f"No hay espacio suficiente en {drive} para este evento.\n\n"
+                f"Fotos RAW: {core.human_size(need)}  ·  el evento entero ocupará ~{core.human_size(want)}\n"
+                f"(originales, DNG, JPEG de Imagen, finales, Luminar y videos)\n"
+                f"Libre ahora: {core.human_size(free)}  ·  faltan ~{core.human_size(want - free)}\n\n"
+                "Libera espacio o pulsa «Cambiar» para crear el evento en otro disco.\n¿Empezar igualmente?")
             if r != QMessageBox.StandardButton.Yes:
+                self.status.setText(f"⚠ Falta espacio en {drive}: ~{core.human_size(want - free)}.")
                 return
         eject = [k for k, c in self.cards.items() if c.selected and k not in self.dropped   # carpetas: nunca
                  and not _inside(dest, k)]         # ni el disco donde se crea el evento (se quedaría sin destino)
@@ -2138,6 +2323,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ registro (registro.log)
     LOG = (Path(os.environ.get("APPDATA") or Path.home()) / "RawFlow/registro.log" if sys.platform == "win32"
            else Path.home() / "Library/Application Support/RawFlow/registro.log")
+    if os.environ.get("RAWFLOW_SIN_APPS") == "1":     # pruebas: nunca en el registro de verdad (26-nov-2026: al
+        LOG = _TEST_DIR / "registro.log"              # compilar salían «Paso 4 desactivado» de las pruebas en el tuyo)
 
     def _log(self, text: str):
         try:
@@ -2294,8 +2481,48 @@ class MainWindow(QMainWindow):
                 text += f"  ·  {len(avisos)} aviso{'s' if len(avisos) > 1 else ''}"
             for a in avisos:
                 self._log("    ⚠ AVISO: " + a)
+        if err != "Cancelado.":                          # (al cancelar tú, no hace falta avisar)
+            self._notify_done(not err, f"{ev.name}: {title}", text)
+        if not err:
+            try:
+                self._start_backup(ev)
+            except Exception as e:  # noqa: BLE001
+                self._log(f"⚠ No se pudo empezar la copia de seguridad ({e})")
         self.runscreen.finish(not err, title, text, lambda: self._after_finish(event, err, summary),
                               hold=2.8 if not err else 2.0)
+
+    def _notify_done(self, ok: bool, title: str, text: str) -> None:
+        """26-nov-2026: aviso al terminar (o pararse) el evento, para no tener que estar mirando: sonido del sistema,
+        notificación de Windows con el resumen y el icono de RawFlow parpadeando en la barra de tareas."""
+        if os.environ.get("RAWFLOW_SIN_APPS") == "1":
+            return
+        try:
+            if sys.platform == "win32":
+                import winsound
+                winsound.PlaySound("SystemAsterisk" if ok else "SystemHand",
+                                   winsound.SND_ALIAS | winsound.SND_ASYNC)
+            else:
+                QApplication.beep()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from PySide6.QtWidgets import QSystemTrayIcon
+            if QSystemTrayIcon.isSystemTrayAvailable():
+                tray = getattr(self, "_tray", None)
+                if tray is None:
+                    tray = self._tray = QSystemTrayIcon(app_icon(), self)
+                    tray.setToolTip(APP_NAME)
+                    tray.messageClicked.connect(lambda: (self.showNormal(), self.raise_(), self.activateWindow()))
+                tray.show()
+                tray.showMessage(title, text, QSystemTrayIcon.MessageIcon.Information if ok
+                                 else QSystemTrayIcon.MessageIcon.Warning, 20000)
+                QTimer.singleShot(60_000, tray.hide)          # el icono no se queda en la bandeja
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            QApplication.alert(self, 0)                       # parpadea en la barra de tareas hasta que la mires
+        except Exception:  # noqa: BLE001
+            pass
 
     def _after_finish(self, event: str, err: str, summary: dict):
         try:                                   # el aviso de la memoria sigue si no la sacaste: ahora un clic lo cierra
@@ -2465,7 +2692,13 @@ class MainWindow(QMainWindow):
                 w.close()
             except RuntimeError:
                 pass
-        threads = [self.pipe, self.watcher, self.inputlock] + list(self.scanners.values())
+        bks = list(getattr(self, "backups", ()))
+        for bk in bks:
+            try:
+                bk.stop()
+            except RuntimeError:                   # (ya terminó y se borró)
+                pass
+        threads = [self.pipe, self.watcher, self.inputlock] + bks + list(self.scanners.values())
         deadline = time.monotonic() + 20
         for th in threads:
             try:
@@ -2479,7 +2712,7 @@ class MainWindow(QMainWindow):
             pass
 
     def threads_alive(self) -> bool:
-        for th in [self.pipe, self.watcher, self.inputlock] + list(self.scanners.values()):
+        for th in [self.pipe, self.watcher, self.inputlock] + list(getattr(self, "backups", ())) + list(self.scanners.values()):
             try:
                 if th is not None and th.isRunning():
                     return True

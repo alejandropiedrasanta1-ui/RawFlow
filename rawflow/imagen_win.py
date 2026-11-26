@@ -80,6 +80,7 @@ class Screen:
         self.rect = (0, 0, 0, 0)
         self._last = ("", [])
         self._fcheck = 0.0
+        self._blind = False           # True: la última vez Windows no dejó la ventana delante (no se pulsa a ciegas)
 
     # ---- ventana
     def window(self) -> Optional[dict]:
@@ -99,53 +100,108 @@ class Screen:
     _SYSTEM = ("explorer.exe", "rawflow.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe",
                "searchhost.exe", "searchapp.exe", "textinputhost.exe", "applicationframehost.exe", "dwm.exe")
 
-    def _uncover(self) -> None:
+    def _covering(self) -> List[dict]:
+        """Ventanas de OTROS programas que tapan (más del 3 %) la del programa."""
+        w = self.window()
+        if not w:
+            return []
+        x, y, ww, hh = w["rect"]
+        res = []
+        for o in ws.windows():                                   # de delante hacia atrás
+            if o["hwnd"] == w["hwnd"]:
+                break
+            exe = (o.get("exe") or "").lower()
+            if o["min"] or not exe or exe == self.exe.lower() or exe in self._SYSTEM:
+                continue
+            if o.get("pid") == os.getpid():                      # RawFlow misma (también desde el código, con
+                continue                                         # python.exe): su pantalla y su botón «Parar» no
+            ox, oy, ow, oh = o["rect"]
+            ix, iy = min(x + ww, ox + ow) - max(x, ox), min(y + hh, oy + oh) - max(y, oy)
+            if ix > 0 and iy > 0 and ix * iy > 0.03 * ww * hh:
+                res.append(o)
+        return res
+
+    def _uncover(self) -> bool:
         """Minimiza las ventanas de OTROS programas que tapan la del programa. 25-nov-2026: una ventana «siempre
         visible» (Claude) quedaba encima de Imagen aunque Imagen estuviera delante; RawFlow leía en pantalla el texto
-        de esa ventana, sus clics caían en ella y el paso 4 se paró varias veces. Solo se minimiza (nada se cierra)."""
+        de esa ventana, sus clics caían en ella y el paso 4 se paró varias veces. Solo se minimiza (nada se cierra).
+        26-nov-2026: se COMPRUEBA que quedó al descubierto (antes no se miraba) y, si no, queda dicho en el registro.
+        True = nada la tapa."""
         try:
-            w = self.window()
-            if not w:
-                return
-            x, y, ww, hh = w["rect"]
-            for o in ws.windows():                               # de delante hacia atrás
-                if o["hwnd"] == w["hwnd"]:
-                    break
-                exe = (o.get("exe") or "").lower()
-                if o["min"] or not exe or exe == self.exe.lower() or exe in self._SYSTEM:
-                    continue
-                if o.get("pid") == os.getpid():                  # RawFlow misma (también desde el código, con
-                    continue                                     # python.exe): su pantalla y su botón «Parar» no
-                ox, oy, ow, oh = o["rect"]
-                ix, iy = min(x + ww, ox + ow) - max(x, ox), min(y + hh, oy + oh) - max(y, oy)
-                if ix > 0 and iy > 0 and ix * iy > 0.03 * ww * hh:
-                    self.log(f"   («{o['title'][:40] or exe}» tapaba la ventana: la minimizo)")
-                    ws.user32.ShowWindow(o["hwnd"], 6)           # SW_MINIMIZE
-                    time.sleep(0.3)
+            tapan = self._covering()
+            for o in tapan:
+                self.log(f"   («{o['title'][:40] or o.get('exe')}» tapaba la ventana: la minimizo)")
+                ws.user32.ShowWindow(o["hwnd"], 6)               # SW_MINIMIZE
+                time.sleep(0.3)
+            if not tapan:
+                return True
+            siguen = self._covering()
+            for o in siguen:
+                self.log(f"   ⚠ «{o['title'][:40] or o.get('exe')}» sigue tapando la ventana (no se deja minimizar)")
+            return not siguen
         except Exception:  # noqa: BLE001
-            pass
+            return True
+
+    def _is_front(self) -> bool:
+        return (ws.foreground().get("exe") or "").lower() == self.exe.lower()
 
     def front(self, force: bool = False) -> None:
-        """Si otra ventana se puso delante, vuelve a traer la del programa (RawFlow solo ve y toca lo de delante)."""
+        """Si otra ventana se puso delante, vuelve a traer la del programa (RawFlow solo ve y toca lo de delante).
+        26-nov-2026: lo que devuelve ws.activate no se miraba; si Windows no la deja delante se prueba UNA vez más y,
+        si tampoco, UIError: antes se seguía y los clics caían a ciegas en la ventana de otro programa."""
         if not force and time.time() - self._fcheck < 1.5:
             return
+        if self.should_stop():
+            raise UIError("Cancelado.")
         self._fcheck = time.time()
         self._uncover()
-        fg = ws.foreground()
-        if fg.get("exe", "").lower() == self.exe.lower():
+        if self._is_front():
+            self._blind = False
             return
         w = self.window() or self.main_window()
-        if w:
+        if not w:
+            return
+        for k in range(2):
+            if k:
+                self.log(f"   (Windows no deja {self.exe[:-4]} delante: lo intento otra vez)")
+                self._uncover()
+                time.sleep(0.6)
+                w = self.window() or self.main_window() or w
             big = w["rect"][2] > 900 or w["min"]          # minimizada: es la principal, vuelve maximizada
-            ws.activate(w["hwnd"], maximize=big, primary=big)
+            ok = ws.activate(w["hwnd"], maximize=big, primary=big)
             time.sleep(0.5)
+            if ok or self._is_front():
+                self._blind = False
+                return
+        self._not_front()
+
+    def _not_front(self) -> None:
+        """No queda delante: una captura (SIN volver a leer la pantalla: diag→ocr→front se llamaba a sí mismo en
+        bucle durante minutos, revisión 26-nov-2026) y UIError. La próxima vez se espera 1,5 s antes de reintentar."""
+        self._blind = True
+        self._fcheck = time.time()
+        if time.time() - getattr(self, "_diag_front_t", 0.0) > 60:      # una captura por minuto, no una por intento
+            self._diag_front_t = time.time()
+            diag(self, "no-queda-delante", boxes=[])
+        raise UIError(f"No consigo poner {self.exe[:-4]} delante (otra ventana no la deja): no pulso a ciegas.")
 
     def activate(self) -> None:
         w = self.main_window()
         if not w:
             raise UIError(f"No encuentro la ventana de {self.exe[:-4]}.")
-        ws.activate(w["hwnd"], maximize=True, primary=True)
-        time.sleep(0.8)
+        for k in range(2):                                # 26-nov-2026: antes no se miraba si quedó delante
+            if ws.activate(w["hwnd"], maximize=True, primary=True) or self._is_front():
+                time.sleep(0.8)
+                return
+            self._uncover()
+            time.sleep(0.8)
+        self._not_front()
+
+    def _sure_front(self) -> None:
+        """Antes de pulsar o escribir: si la última vez la ventana no quedó delante (el fallo se tragó en una lectura),
+        se intenta otra vez y, si no, UIError (26-nov-2026: nada de clics a ciegas en otra ventana)."""
+        if getattr(self, "_blind", False):
+            self.front(force=True)
 
     # ---- leer
     def ocr(self, scale: int = 1) -> List[dict]:
@@ -198,9 +254,11 @@ class Screen:
 
     # ---- tocar
     def click(self, x: float, y: float, n: int = 1) -> None:
+        self._sure_front()
         ws.click(x, y, n)
 
     def click_box(self, b: dict, after: float = 0.8) -> None:
+        self._sure_front()
         ws.click(b["x"] + b["w"] / 2, b["y"] + b["h"] / 2)
         time.sleep(after)
 
@@ -213,9 +271,11 @@ class Screen:
         return b
 
     def keys(self, combo: str) -> None:
+        self._sure_front()
         ws.keys(combo)
 
     def type(self, text: str) -> None:
+        self._sure_front()
         ws.type_text(text)
 
     def esc(self) -> None:
@@ -552,6 +612,51 @@ def _pick_folder(s: Screen, folder: Path) -> None:
 NAME_STAY = 3.0          # segundos que el nombre escrito debe seguir en la casilla para darlo por bueno
 
 
+def _name_look(s: Screen, name_box: dict, scale: int):
+    """(rótulo «Nombra tu proyecto» —el de antes si no se lee—, su alto, lo leído en la casilla justo debajo)."""
+    boxes = s.ocr(scale=scale)
+    lab = s.find("Nombra tu proyecto", boxes=boxes)
+    nb = lab[0] if lab else name_box
+    h = nb["h"]
+    return nb, h, [b for b in boxes if 1.2 * h < b["y"] - nb["y"] < 3.8 * h and -2 * h < b["x"] - nb["x"] < 30 * h]
+
+
+def _name_written(s: Screen, name_box: dict, project: str) -> bool:
+    """¿Está `project` escrito en la casilla del nombre? El cursor parpadea pegado al final y el OCR a veces lee
+    «… n2» como «… n?» o «… r-,21» (visto en vivo): con el principio exacto y ALGO detrás vale (lo escribimos
+    nosotros sobre toda la casilla; la propuesta de Imagen, «2 DNGs 0517», no empieza así). Sin «n2» detrás
+    («25 nov 2026» a secas) no vale."""
+    full = norm(project).strip()
+    base = norm(re.sub(r" n[0-9]+$", "", project)).strip()
+    tight = lambda t: t.replace(" ", "")                  # noqa: E731
+    for scale in (2, 1):
+        for b in _name_look(s, name_box, scale)[2]:
+            t = norm(b["t"]).strip()
+            if full[:18] in t or (base != full and t.startswith(base) and len(tight(t)) > len(tight(base))):
+                return True
+    return False
+
+
+def _name_still_there(s: Screen, name_box: dict, project: str) -> None:
+    """Justo antes de «Siguiente»: el nombre SIGUE en la casilla. 26-nov-2026 (revisión del 25-nov): Imagen puede
+    recolocar el diálogo y poner su propuesta también DESPUÉS de comprobarlo (al elegir el tipo de foto, o con el
+    aviso de nombre repetido); se creaba el proyecto con el nombre de Imagen y el reintento ya no lo encontraba.
+    Si no está, se vuelve a escribir (y a comprobar). Sin el rótulo en pantalla no se toca nada (no se sabe dónde
+    está la casilla)."""
+    if not s.find("Nombra tu proyecto", boxes=s.ocr(scale=2)) and not s.find("Nombra tu proyecto"):
+        s.log("   (no leo «Nombra tu proyecto» para comprobar el nombre: sigo)")
+        return
+    if _name_written(s, name_box, project):
+        return
+    s.log(f"   (Imagen cambió el nombre del proyecto: vuelvo a escribir «{project}»)")
+    try:
+        _type_name(s, name_box, Path("."), project)
+    except UIError as e:                       # (revisión 26-nov-2026: una comprobación EXTRA no debe tumbar una
+        if str(e) == "Cancelado.":             # creación de proyecto que antes salía bien; se sigue y se avisa)
+            raise
+        s.log(f"   ⚠ no pude confirmar el nombre «{project}» ({e}): sigo")
+
+
 def _type_name(s: Screen, name_box: dict, dng_dir: Path, project: str) -> None:
     """Escribe el nombre en «Nombra tu proyecto» y COMPRUEBA que quedó escrito Y QUE SIGUE AHÍ.
     25-nov-2026 (visto en vivo, paso 4 parado cuatro veces): unos 9 s después de abrirse el diálogo, Imagen recoloca
@@ -559,34 +664,13 @@ def _type_name(s: Screen, name_box: dict, dng_dir: Path, project: str) -> None:
     escribía bien el nombre, Imagen lo pisaba, y los reintentos iban al sitio antiguo: caían fuera de la casilla y
     Ctrl+A seleccionaba toda la página. Ahora en cada vuelta se vuelve a buscar el rótulo (la casilla está justo
     debajo, tenga dentro el ejemplo, el nombre de la carpeta o lo que sea) y el nombre solo vale si aguanta."""
-    def look(scale: int):
-        boxes = s.ocr(scale=scale)
-        lab = s.find("Nombra tu proyecto", boxes=boxes)
-        nb = lab[0] if lab else name_box
-        h = nb["h"]
-        return nb, h, [b for b in boxes if 1.2 * h < b["y"] - nb["y"] < 3.8 * h and -2 * h < b["x"] - nb["x"] < 30 * h]
-
-    full = norm(project).strip()
-    base = norm(re.sub(r" n[0-9]+$", "", project)).strip()
-    tight = lambda t: t.replace(" ", "")                  # noqa: E731
-
-    def written() -> bool:
-        # El cursor parpadea pegado al final y el OCR a veces lee «… n2» como «… n?» o «… r-,21» (visto en vivo): con
-        # el principio exacto y ALGO detrás vale (lo acabamos de escribir nosotros sobre toda la casilla; la propuesta
-        # de Imagen, «2 DNGs 0517», no empieza así). Sin «n2» detrás («25 nov 2026» a secas) no vale.
-        for scale in (2, 1):
-            for b in look(scale)[2]:
-                t = norm(b["t"]).strip()
-                if full[:18] in t or (base != full and t.startswith(base) and len(tight(t)) > len(tight(base))):
-                    return True
-        return False
-
+    written = lambda: _name_written(s, name_box, project)     # noqa: E731
     time.sleep(1.0)                                       # el diálogo termina de aparecer
     boxes = None
     for k in range(7):
         if s.should_stop():
             raise UIError("Cancelado.")
-        nb, h, inside = look(2 if k % 2 else 1)
+        nb, h, inside = _name_look(s, name_box, 2 if k % 2 else 1)
         if inside:
             s.click_box(min(inside, key=lambda b: b["x"]), after=0.4)      # dentro de la casilla, sobre su texto
         else:
@@ -639,6 +723,7 @@ def _create_project(s: Screen, dng_dir: Path, project: str, photo_type: str, pfi
     pfile.write_text(project, encoding="utf-8")          # si se corta aquí, el reintento lo busca antes de crear otro
     try:
         s.tap(photo_type, exact=True, timeout=10)
+        _name_still_there(s, name_box, project)               # Imagen pudo pisarlo después de comprobarlo
         s.tap("guiente", timeout=10, pick=-1, after=1.2)      # «Siguiente»
         s.wait("Perfil IA", "Selección con IA", timeout=30)
         s.tap("guiente", timeout=10, pick=-1, after=1.2)
@@ -857,7 +942,11 @@ def _await_download(s: Screen, dng_dir: Path, mark, dngs: List[Path]):
     t0, t_ok, asked = time.time(), None, False
     limit = max(300, 2 * len(dngs))
     res = None
-    t_tap, taps = time.time(), 0
+    t_tap, taps, looks = time.time(), 0, 0
+    # 26-nov-2026 (revisión): «nada bajado aún» se medía como «ningún DNG lleva ediciones»; en el 2.º intento (o si
+    # algunos DNG ya las traían) eso nunca era cierto y el botón no se volvía a pulsar jamás. Ahora se compara con
+    # cuántos faltaban AL EMPEZAR (n0): si siguen faltando los mismos, la descarga no ha empezado.
+    n0 = len(core.without_imagen(dngs))
     while time.time() - t0 < limit:
         if s.should_stop():
             raise UIError("Cancelado.")
@@ -865,10 +954,21 @@ def _await_download(s: Screen, dng_dir: Path, mark, dngs: List[Path]):
         # 25-nov-2026: el clic en «Descargar ediciones» no entró (otra ventana se puso delante), el diálogo siguió
         # abierto y RawFlow esperó 20 min una descarga que no había empezado. Si a los RETAP_AFTER s el botón sigue
         # ahí y ningún DNG lleva ediciones, se vuelve a pulsar (el diálogo se cierra en cuanto la descarga empieza).
-        if res is None and taps < RETAP_MAX and time.time() - t_tap > RETAP_AFTER:
+        if res is None and time.time() - t_tap > RETAP_AFTER:
             t_tap = time.time()
-            btn = _download_button(s, s.ocr(scale=2 if taps % 2 else 1))
-            if btn and len(core.without_imagen(dngs)) == len(dngs):
+            # (una lectura a tamaño real y la siguiente ×2: contaba las PULSACIONES, y si el botón no se leía la
+            # escala no cambiaba nunca — 26-nov-2026)
+            btn = _download_button(s, s.ocr(scale=2 if looks % 2 else 1))
+            looks += 1
+            if btn and len(core.without_imagen(dngs)) >= n0:
+                if taps >= RETAP_MAX:
+                    # 26-nov-2026: ya pulsado RETAP_MAX veces más y el diálogo sigue ahí sin bajar nada: se para
+                    # YA con un aviso claro, en vez de esperar los 5+ min del límite para nada.
+                    # (no UIError: así _download_edits hace sus DL_TRIES —volver a Proyectos, esperar, reabrir el
+                    # diálogo—, que es lo que lo arregla; con la excepción se saltaban. Revisión 26-nov-2026)
+                    diag(s, "descarga-no-arranca")
+                    return ("NO_ARRANCA", f"pulsé «Descargar ediciones» {RETAP_MAX + 1} veces y el diálogo sigue "
+                                          "abierto sin bajar nada")
                 taps += 1
                 s.log(f"   (el botón «Descargar ediciones» sigue ahí: lo pulso otra vez, {taps} de {RETAP_MAX})")
                 s.click_box(btn, after=1)
@@ -1019,7 +1119,9 @@ def _open_bridge(s: Screen, dng_dir: Path) -> None:
             t_launch = time.time()
         time.sleep(1)
     w = s.main_window()
-    ws.activate(w["hwnd"], maximize=True, primary=True)        # en la pantalla principal su letra se lee bien
+    if not ws.activate(w["hwnd"], maximize=True, primary=True):    # en la pantalla principal su letra se lee bien
+        s.log("   (Bridge no quedó delante al abrirse: lo vuelvo a intentar antes de pulsar nada)")
+        s._blind = True                       # 26-nov-2026: el primer clic lo reintenta y, si no, para con UIError
     time.sleep(1.0)
 
 
@@ -1065,7 +1167,146 @@ def _bridge_export_button(s: Screen, tries: int = 4) -> Optional[dict]:
     return None
 
 
+MISSING_DIR = "RawFlow faltan en Bridge"     # (dentro de «2 DNGs») enlaces a los DNG que aún no tienen su JPEG
+
+
+def _jpeg_complete(p: Path) -> bool:
+    """¿Termina el JPEG con su marca de fin (FF D9)? Uno cortado a medias (Bridge parado escribiéndolo) no."""
+    try:
+        with open(p, "rb") as f:
+            f.seek(0, 2)
+            n = f.tell()
+            if n < 1024:
+                return False
+            f.seek(max(0, n - 4096))                # (revisión 26-nov-2026: con 64 bytes, un JPEG bueno con datos
+            return b"\xff\xd9" in f.read()          # detrás del final —relleno, MPF— se daba por cortado y se borraba)
+    except OSError:
+        return False
+
+
+def _missing_dngs(dng_dir: Path, out_dir: Path) -> List[Path]:
+    """DNG de `dng_dir` sin su JPEG completo en `out_dir` (los JPEG cortados a medias se borran: no valen)."""
+    clean_exports(out_dir) if out_dir.is_dir() else None
+    want = {core.dng_base(q): q for q in dng_dir.glob("*.dng")}
+    have = set()
+    for p in (out_dir.glob("*.jpg") if out_dir.is_dir() else []):
+        if p.stem.lower() not in want:          # JPEG sin DNG en este lote (apartada, de la cámara…): ni se mira ni
+            continue                            # se borra (revisión 26-nov-2026)
+        if _jpeg_complete(p):
+            have.add(p.stem.lower())
+        else:
+            p.unlink(missing_ok=True)
+    return sorted(q for k, q in want.items() if k not in have)
+
+
+def _link_missing(dng_dir: Path, missing: List[Path]) -> Optional[Path]:
+    """«2 DNGs/RawFlow faltan en Bridge» con enlaces (instantáneos, sin ocupar disco) a esos DNG y sus .xmp.
+    None si el disco no deja hacer enlaces (entonces se exporta todo, como antes)."""
+    import shutil
+    sub = dng_dir / MISSING_DIR
+    shutil.rmtree(sub, ignore_errors=True)
+    try:
+        sub.mkdir()
+        for q in missing:
+            os.link(q, sub / q.name)
+            side = q.with_suffix(".xmp")
+            if side.exists():
+                os.link(side, sub / side.name)
+        return sub
+    except OSError:
+        shutil.rmtree(sub, ignore_errors=True)
+        return None
+
+
 def bridge_export(s: Screen, dng_dir: Path, out_dir: Path, expected: int, progress=lambda f: None) -> int:
+    """Bridge exporta a `out_dir` los JPEG que FALTAN de los DNG de `dng_dir`. Devuelve cuántos JPEG hay en `out_dir`.
+    26-nov-2026 (revisión del 25-nov, paso 4 de ~3 h): si un intento anterior exportó solo una parte, esos JPEG se
+    quedan (son buenos; los cortados a medias se borran) y Bridge exporta solo los que faltan, desde una carpeta con
+    enlaces a esos DNG. Antes se exportaba todo otra vez: más tiempo y, como los JPEG ya existentes no contaban como
+    nuevos, el vigilante nunca llegaba a `expected` y daba «Bridge dejó de exportar»."""
+    import shutil
+    shutil.rmtree(dng_dir / MISSING_DIR, ignore_errors=True)     # resto de un intento cortado
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dngs = sorted(dng_dir.glob("*.dng"))
+    missing = _missing_dngs(dng_dir, out_dir)
+    if dngs and not missing:
+        s.log(f"Bridge: los {len(dngs)} JPEG ya estaban exportados en «{out_dir.name}».")
+        return clean_exports(out_dir)
+    if not dngs or len(missing) == len(dngs):
+        return _bridge_export_dir(s, dng_dir, out_dir, expected, progress)
+    sub = _link_missing(dng_dir, missing)
+    if sub is None:
+        s.log("   (no puedo hacer enlaces en este disco: Bridge exporta todas otra vez)")
+        return _bridge_export_dir(s, dng_dir, out_dir, expected, progress)
+    s.log(f"Bridge: ya había {len(dngs) - len(missing)} de {len(dngs)} JPEG (se quedan); exporto los {len(missing)} "
+          "que faltan.")
+    try:
+        _bridge_export_dir(s, sub, out_dir, len(missing), progress)
+    finally:
+        close_app(BRIDGE_EXE)                # (suelta los DNG enlazados para poder borrar la carpeta)
+        shutil.rmtree(sub, ignore_errors=True)
+    return clean_exports(out_dir)
+
+
+def _bridge_selected(boxes) -> Optional[int]:
+    """«120 elementos, 120 seleccionados - 2,81 GB» (barra de estado de Bridge) → 120. None si no se lee."""
+    for b in boxes:
+        m = re.search(r"(\d[\d.]*)\s*(?:seleccionad|selected)", norm(b["t"]))
+        if m:
+            try:
+                return int(m.group(1).replace(".", ""))
+            except ValueError:
+                pass
+    return None
+
+
+def _bridge_unfold_format(s: Screen) -> None:
+    """La sección «Formato de imagen» del diálogo de exportación, DESPLEGADA (ahí están «Formato» y la calidad).
+    26-nov-2026 (revisión): Bridge recuerda qué secciones se plegaron; con esa plegada no se veía «Formato» y el
+    paso se paraba a los 10 s. Solo se pulsa la flecha (a la izquierda del rótulo, como en «Opciones de guardado»)
+    si NO se ve lo de dentro."""
+    for _ in range(2):
+        boxes = s.ocr()
+        if s.find("Calidad de imagen", boxes=boxes) or s.find("Formato", exact=True, boxes=boxes):
+            return
+        hdr = s.find("Formato de imagen", boxes=boxes)
+        if not hdr:
+            return                                  # (sin el rótulo no se pulsa nada: lo de abajo dirá qué falta)
+        s.log("   (Bridge: «Formato de imagen» estaba plegado: lo despliego)")
+        s.click(hdr[0]["x"] - 1.8 * hdr[0]["h"], hdr[0]["y"] + hdr[0]["h"] / 2)
+        time.sleep(0.7)
+
+
+def _bridge_quality(s: Screen, reads: int = 4):
+    """(caja del número de calidad JPEG, ¿dice «Máxima»?), leído hasta que DOS lecturas seguidas coinciden, una a
+    tamaño real y otra ×2. 26-nov-2026 (revisión): con una sola lectura, un «12» mal leído (o un «2» del «12»
+    partido) bastaba para dar la calidad por buena o por mala. La posición se busca respecto a «Calidad de imagen»
+    leído EN LA MISMA lectura (×2, las cajas de este diálogo salen algo desplazadas). Para pulsar se devuelve la
+    caja de una lectura a tamaño real. Si nunca coinciden: (None, False) → se escribe 12 y se comprueba otra vez."""
+    def one(scale: int):
+        bs = s.ocr(scale=scale)
+        qs = s.find("Calidad de imagen", boxes=bs)
+        if not qs:
+            return None, False
+        q = qs[0]
+        row = [b for b in bs if 0.8 * q["h"] < b["y"] - q["y"] < 3.5 * q["h"] and b["x"] > q["x"]]
+        num = [b for b in row if b["t"].strip().isdigit() and 1 <= int(b["t"].strip()) <= 12]
+        return (num[0] if num else None), any(norm(b["t"]).strip() == "maxima" for b in row)
+    prev, box1, box = None, None, None
+    for k in range(reads):
+        num, top = one(2 if k % 2 else 1)
+        box = num or box
+        if not k % 2 and num:
+            box1 = num
+        key = (num["t"].strip() if num else None, top)
+        if prev is not None and key == prev and key[0] is not None:
+            return (box1 or num), top
+        prev = key
+    s.log("   (Bridge: la calidad JPEG no se lee igual dos veces seguidas: la escribo)")
+    return (box1 or box), False
+
+
+def _bridge_export_dir(s: Screen, dng_dir: Path, out_dir: Path, expected: int, progress=lambda f: None) -> int:
     """Bridge abre la carpeta de DNG, selecciona todo y exporta JPEG (calidad 12) a `out_dir` con
     Archivo → Exportar a → Exportación personalizada. Devuelve cuántos JPEG hay en `out_dir`."""
     log = s.log
@@ -1094,10 +1335,25 @@ def bridge_export(s: Screen, dng_dir: Path, out_dir: Path, expected: int, progre
             raise UIError("Bridge no muestra los DNG.")
         time.sleep(0.5)
     t = min(thumbs, key=lambda b: (b["y"], b["x"]))
-    s.click(t["x"] + t["w"] / 2, t["y"] - 3.5 * t["h"])    # la miniatura (encima de su nombre)
-    time.sleep(0.6)
-    s.keys("ctrl+a")                                        # todas
-    time.sleep(1.0)
+    for k in range(3):
+        s.click(t["x"] + t["w"] / 2, t["y"] - 3.5 * t["h"])    # la miniatura (encima de su nombre)
+        time.sleep(0.6)
+        s.keys("ctrl+a")                                        # todas
+        time.sleep(1.0)
+        # 26-nov-2026 (revisión): se exportaba sin mirar si Ctrl+A había entrado (a veces solo quedaba elegida la
+        # miniatura pulsada y Bridge exportaba UNA foto). La barra de estado dice «N elementos, M seleccionados»;
+        # (puede haber carpetas: M ≥ DNG vale). Si no se lee, se sigue: el vigilante de JPEG de abajo lo pillaría.
+        sel = _bridge_selected(s.ocr())
+        if sel is None:
+            sel = _bridge_selected(s.ocr(scale=2))            # la barra de estado es letra pequeña
+        if sel is None or sel >= len(stems):
+            break
+        log(f"   (Bridge: solo {sel} de {len(stems)} fotos seleccionadas: Ctrl+A otra vez)")
+    else:
+        # (revisión 26-nov-2026: el OCR puede leer mal el número —«720» como «20»— y se paraba un paso que iba bien.
+        # Se avisa y se sigue: lo que Bridge no exporte lo pilla el vigilante de JPEG y se repite SOLO eso)
+        diag(s, "bridge-seleccion-incompleta")
+        log(f"   ⚠ Bridge parece tener {sel} de {len(stems)} fotos seleccionadas: exporto y compruebo foto a foto.")
     for k in range(3):
         try:
             # (un Bridge recién abierto a veces no despliega el menú al primer clic: se reintenta AQUÍ, sin volver a
@@ -1135,20 +1391,17 @@ def bridge_export(s: Screen, dng_dir: Path, out_dir: Path, expected: int, progre
             break
         s.click(og["x"] - 1.8 * og["h"], og["y"] + og["h"] / 2)        # la flecha, a la izquierda del rótulo
         time.sleep(0.7)
+    _bridge_unfold_format(s)
     fmt = s.wait("Formato", exact=True, timeout=10)
     boxes = s.ocr()
     if not [b for b in boxes if norm(b["t"]).strip() == "jpeg" and 0 < b["y"] - fmt["y"] < 4 * fmt["h"]]:
         s.click(fmt["x"] + 8 * fmt["h"], fmt["y"] + 3 * fmt["h"])
         s.tap("JPEG", exact=True, timeout=5, after=1)
-    q = s.wait("Calidad de imagen", timeout=10)
-
-    def quality(bs):
-        row = [b for b in bs if 0.8 * q["h"] < b["y"] - q["y"] < 3.5 * q["h"] and b["x"] > q["x"]]
-        num = [b for b in row if b["t"].strip().isdigit() and 1 <= int(b["t"].strip()) <= 12]
-        return (num[0] if num else None), any(norm(b["t"]).strip() == "maxima" for b in row)
-    num, top = quality(s.ocr())
+    s.wait("Calidad de imagen", timeout=10)
+    num, top = _bridge_quality(s)
     if not (num and num["t"].strip() == "12" and top):
         if not num:
+            diag(s, "bridge-sin-calidad")
             raise UIError("No encuentro la calidad JPEG en el diálogo de Bridge.")
         s.click(num["x"] + num["w"] / 2, num["y"] + num["h"] / 2)
         time.sleep(0.3)
@@ -1156,8 +1409,9 @@ def bridge_export(s: Screen, dng_dir: Path, out_dir: Path, expected: int, progre
         s.type("12")
         s.keys("tab")
         time.sleep(0.8)
-        num, top = quality(s.ocr())
+        num, top = _bridge_quality(s)
         if not (top or (num and num["t"].strip() == "12")):
+            diag(s, "bridge-calidad-no-12")
             raise UIError("No pude poner la calidad JPEG en máxima en Bridge.")
     go = _bridge_export_button(s)
     if not go:

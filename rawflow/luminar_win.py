@@ -206,6 +206,13 @@ def _menu(s, *path: str, then: str = "") -> None:
             raise iw.UIError(f"No encuentro «{item}» en el menú de Luminar.")
 
 
+def _name_typed(path: Path, boxes) -> bool:
+    """¿Se lee en pantalla el principio del nombre del archivo? Sin tildes ni mayúsculas en los dos lados."""
+    from . import imagen_win as iw
+    want = iw.norm(path.stem[:12]).strip()
+    return bool(want) and any(want in iw.norm(b["t"]) for b in boxes)
+
+
 def _save_as(s, path: Path) -> None:
     """Diálogo «Guardar como» de Windows: la ruta completa en «Nombre de archivo» y Guardar."""
     from . import imagen_win as iw
@@ -213,7 +220,7 @@ def _save_as(s, path: Path) -> None:
     t0 = time.time()
     while time.time() - t0 < 30:
         w = s.window()
-        if w and "guardar" in w["title"].lower():
+        if w and "guardar" in iw.norm(w["title"]):
             ws.activate(w["hwnd"], maximize=False)
             time.sleep(0.8)
             if not s.find("Nombre de archivo", boxes=s.ocr()):
@@ -224,7 +231,9 @@ def _save_as(s, path: Path) -> None:
             s.keys("ctrl+a")
             s.type(str(path))
             time.sleep(0.6)
-            if any(path.stem[:12].lower() in iw.norm(b["t"]) for b in s.ocr()):   # se ve escrito: Guardar
+            # se ve escrito: Guardar. 26-nov-2026 (revisión): las DOS partes con norm (sin tildes ni mayúsculas);
+            # antes solo lo leído, y un catálogo «Boda José…» nunca «se veía escrito» y se reintentaba 30 s.
+            if _name_typed(path, s.ocr()):
                 s.keys("enter")
                 time.sleep(1.5)
                 return
@@ -492,7 +501,10 @@ def _add_folder(s, src: Path, n: int, log: Log) -> None:
         # mandar el atajo; ahora se vuelve a traer delante y se intenta otra vez.
         if picker():
             break
-        s.front(force=True)
+        try:
+            s.front(force=True)                      # (26-nov-2026: front da UIError si no queda delante; aquí
+        except iw.UIError:                           # ya hay sus propios reintentos)
+            pass
         if (ws.foreground().get("exe") or "").lower() != s.exe.lower():
             time.sleep(1.0)
             continue

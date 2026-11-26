@@ -2286,6 +2286,217 @@ def p80():
         w.close()
 
 
+@prueba("Imagen (Windows), nombre del proyecto JUSTO antes de «Siguiente» (26-nov-2026, revisión del 25-nov): si "
+        "Imagen lo pisó después de comprobarlo se escribe otra vez; si sigue ahí, o no se ve el rótulo, no se toca nada",
+        solo_win="Imagen de Windows")
+def p81():
+    from types import SimpleNamespace
+    from rawflow import imagen_win as iw
+    caja = lambda t, x, y, w=120, h=15: {"t": t, "x": x, "y": y, "w": w, "h": h}
+    nombre, rot = "25 nov 2026 n2", caja("Nombra tu proyecto", 1146, 611, 144)
+    hecho, logs, pantalla = [], [], {}
+    s = SimpleNamespace(rect=(920, 250, 1600, 940), should_stop=lambda: False, log=logs.append,
+                        keys=lambda c: hecho.append(("teclas", c)), click=lambda x, y: hecho.append(("clic suelto",)),
+                        click_box=lambda b, after=0: hecho.append(("clic en", b["t"])),
+                        type=lambda t: (hecho.append(("escribe", t)), pantalla.__setitem__("dentro", t))[0])
+    s.find = lambda text, exact=False, boxes=None, region=None: iw.Screen.find(s, text, exact, boxes, region)
+    s.ocr = lambda scale=1: ([rot] if pantalla["rotulo"] else []) + [caja(pantalla["dentro"], 1175, 646)]
+    espera = iw.NAME_STAY
+    try:
+        iw.NAME_STAY = 0.0
+        pantalla.update(rotulo=True, dentro=nombre)                 # sigue ahí: nada
+        iw._name_still_there(s, rot, nombre)
+        assert hecho == [], hecho
+        pantalla.update(rotulo=True, dentro="2 DNGs 0517")          # Imagen lo pisó: se escribe otra vez
+        iw._name_still_there(s, rot, nombre)
+        assert hecho == [("clic en", "2 DNGs 0517"), ("teclas", "ctrl+a"), ("escribe", nombre)], hecho
+        hecho.clear()
+        pantalla.update(rotulo=False, dentro="2 DNGs 0517")         # sin rótulo: no se sabe dónde está la casilla
+        iw._name_still_there(s, rot, nombre)
+        assert hecho == [] and any("no leo" in m for m in logs), (hecho, logs)
+    finally:
+        iw.NAME_STAY = espera
+
+
+@prueba("Imagen (Windows), botón «Descargar ediciones» que no arranca (26-nov-2026, revisión): se vuelve a pulsar "
+        "aunque algunos DNG ya trajeran ediciones (se compara con los que faltaban al empezar), se busca a tamaño real "
+        "y ×2 por turnos, y tras las pulsaciones de más se para YA con un aviso claro", solo_win="Imagen de Windows")
+def p82():
+    from types import SimpleNamespace
+    from rawflow import imagen_win as iw
+    from rawflow.imagen_ui import UIError
+    caja = lambda t, x, y, w=120, h=14: {"t": t, "x": x, "y": y, "w": w, "h": h}
+    dialogo = [caja("Descargar ediciones", 1354, 578, 200, 18), caja("¿Tus fotos siguen aquí?", 1353, 630, 170),
+               caja("Explorar", 2016, 681, 61, 12), caja("Desca", 1910, 847, 45, 12), caja("ar ediciones", 1971, 846, 90, 12)]
+    guardado = (iw.download_result, iw.core.without_imagen, iw.RETAP_AFTER, iw.RETAP_MAX, iw.PROMPT_WAIT, iw.diag)
+    dngs = [Path("a.dng"), Path("b.dng")]
+    try:
+        iw.RETAP_AFTER, iw.RETAP_MAX, iw.PROMPT_WAIT, iw.diag = 0.0, 2, 0.0, lambda *a, **k: None
+        hecho, escalas = [], []
+
+        def falso(ocr):
+            f = SimpleNamespace(rect=(0, 0, 3440, 1440), should_stop=lambda: False, log=lambda m: None,
+                                click_box=lambda b, after=0: hecho.append((b["t"], b["y"])))
+            f.ocr = ocr
+            f.find = lambda text, exact=False, boxes=None, region=None: iw.Screen.find(f, text, exact, boxes, region)
+            return f
+        # 1) «a» ya traía ediciones de antes (falta solo «b»): antes NUNCA se volvía a pulsar
+        iw.core.without_imagen = lambda d: [Path("b.dng")] if Path("b.dng") in list(d) else []
+        iw.download_result = lambda mark, d: ("SUCCESS", 2, 2, "") if hecho else None
+        res = iw._await_download(falso(lambda scale=1: list(dialogo)), Path("C:/e/2 DNGs"), (Path("x.log"), 0), dngs)
+        assert res[0] == "SUCCESS" and len(hecho) == 1, (res, hecho)
+        # 2) el botón solo se lee ampliado ×2: antes la escala no cambiaba si no se pulsaba
+        hecho.clear()
+        iw.core.without_imagen = lambda d: list(d)
+
+        def solo_x2(scale=1):
+            escalas.append(scale)
+            return list(dialogo) if scale == 2 else []
+        t0 = time.time()
+        res = iw._await_download(falso(solo_x2), Path("C:/e/2 DNGs"), (Path("x.log"), 0), dngs)
+        assert res[0] == "SUCCESS" and len(hecho) == 1 and 2 in escalas and time.time() - t0 < 15, (res, hecho, escalas)
+        # 3) nunca arranca: RETAP_MAX pulsaciones de más y se da por fallido AL MOMENTO (no los 5 min del límite),
+        #    devolviendo el fallo para que _download_edits haga sus reintentos (revisión 26-nov-2026: con UIError se
+        #    los saltaba)
+        hecho.clear()
+        iw.download_result = lambda mark, d: None
+        t0 = time.time()
+        res = iw._await_download(falso(lambda scale=1: list(dialogo)), Path("C:/e/2 DNGs"), (Path("x.log"), 0), dngs)
+        assert res and res[0] == "NO_ARRANCA" and "Descargar ediciones" in res[1], res
+        assert len(hecho) == 2 and time.time() - t0 < 20, (hecho, time.time() - t0)
+    finally:
+        iw.download_result, iw.core.without_imagen, iw.RETAP_AFTER, iw.RETAP_MAX, iw.PROMPT_WAIT, iw.diag = guardado
+
+
+@prueba("Imagen/Bridge (Windows), ventana delante (26-nov-2026, revisión): si Windows no la deja delante se prueba "
+        "una vez más y luego UIError (nada de clics a ciegas en otra ventana); y si algo la sigue tapando, queda dicho",
+        solo_win="Imagen de Windows")
+def p83():
+    from types import SimpleNamespace
+    from rawflow import imagen_win as iw
+    from rawflow.imagen_ui import UIError
+    guardado = (iw.ws.windows, iw.ws.foreground, iw.ws.activate, iw.ws.click, iw.ws.user32, iw.diag)
+    imagen = {"hwnd": 7, "title": "Imagen AI", "rect": (0, 0, 1920, 1040), "min": False, "exe": "ImagenAI.exe", "pid": 1}
+    tapa = {"hwnd": 9, "title": "Claude", "rect": (100, 100, 800, 600), "min": False, "exe": "claude.exe", "pid": 2}
+    try:
+        delante, activadas, clics, minimizadas, logs = ["claude.exe"], [], [], [], []
+        iw.ws.windows = lambda title_part="", exe="": [w for w in (tapa, imagen) if not exe or w["exe"] == exe]
+        iw.ws.foreground = lambda: {"hwnd": 1, "title": "", "exe": delante[0]}
+        iw.ws.activate = lambda hwnd, maximize=True, primary=False: activadas.append(hwnd) or delante[0] == "ImagenAI.exe"
+        iw.ws.click = lambda x, y, n=1: clics.append((x, y))
+        iw.ws.user32 = SimpleNamespace(ShowWindow=lambda h, c: minimizadas.append(h))   # «Claude» no se deja
+        iw.diag = lambda *a, **k: None
+        s = iw.Screen(logs.append)
+        assert s._uncover() is False and minimizadas == [9] and any("sigue tapando" in m for m in logs), logs
+        try:
+            s.front(force=True)
+            raise AssertionError("debía parar con UIError")
+        except UIError as e:
+            assert "a ciegas" in str(e), e
+        assert activadas == [7, 7], activadas                       # una vez más, y no más
+        try:
+            s.click(10, 10)                                         # ocr() se traga el fallo: el clic NO va a ciegas
+            raise AssertionError("debía parar con UIError")
+        except UIError:
+            pass
+        assert clics == [], clics
+        iw.ws.activate = lambda hwnd, maximize=True, primary=False: (activadas.append(hwnd), delante.__setitem__(0, "ImagenAI.exe"))[0] or True
+        s.click(10, 10)                                             # ya queda delante: el clic va
+        assert clics == [(10, 10)] and s._blind is False, clics
+    finally:
+        iw.ws.windows, iw.ws.foreground, iw.ws.activate, iw.ws.click, iw.ws.user32, iw.diag = guardado
+
+
+@prueba("Bridge (Windows), diálogo de exportación (26-nov-2026, revisión): «N seleccionados» se lee de la barra de "
+        "estado; «Formato de imagen» plegado se despliega; la calidad JPEG vale solo con DOS lecturas iguales (tamaño "
+        "real y ×2, desplazada)", solo_win="Bridge de Windows")
+def p84():
+    from types import SimpleNamespace
+    from rawflow import imagen_win as iw
+    caja = lambda t, x, y, w=60, h=12: {"t": t, "x": x, "y": y, "w": w, "h": h}
+    assert iw._bridge_selected([caja("Contenido", 0, 0), caja("120 elementos, 120 seleccionados - 2,81 GB", 0, 900)]) == 120
+    assert iw._bridge_selected([caja("1.234 elementos, 1 seleccionado - 25 MB", 0, 900)]) == 1
+    assert iw._bridge_selected([caja("2 items, 2 selected - 50 MB", 0, 900)]) == 2
+    assert iw._bridge_selected([caja("Invertir selección", 0, 0), caja("120 elementos", 0, 900)]) is None
+
+    s = SimpleNamespace(rect=(0, 0, 900, 700), log=lambda m: None)
+    s.find = lambda text, exact=False, boxes=None, region=None: iw.Screen.find(s, text, exact, boxes, region)
+    clics, plegado = [], [True]
+    s.click = lambda x, y, n=1: (clics.append((x, y)), plegado.__setitem__(0, False))
+    s.ocr = lambda scale=1: [caja("Formato de imagen", 300, 200, 120)] + (
+        [] if plegado[0] else [caja("Formato", 320, 230), caja("Calidad de imagen", 320, 280, 100)])
+    iw._bridge_unfold_format(s)
+    assert clics == [(300 - 1.8 * 12, 206)], clics
+    iw._bridge_unfold_format(s)                                     # desplegado: no se toca
+    assert len(clics) == 1
+
+    def lecturas(valores):
+        escalas = []
+
+        def ocr(scale=1):
+            v = valores[min(len(escalas), len(valores) - 1)]
+            escalas.append(scale)
+            d = 30 if scale == 2 else 0                             # ×2: las cajas salen desplazadas
+            return [caja("Calidad de imagen", 320, 280 + d, 100), caja(v, 330, 300 + d, 20), caja("Máxima", 380, 300 + d)]
+        s.ocr = ocr
+        return escalas
+    esc = lecturas(["12", "12"])
+    num, top = iw._bridge_quality(s)
+    assert num["t"] == "12" and num["y"] == 300 and top and esc == [1, 2], (num, top, esc)   # la caja a tamaño real
+    esc = lecturas(["12", "2", "12", "2"])                          # nunca dos iguales: no se da por buena
+    num, top = iw._bridge_quality(s)
+    assert num is not None and top is False and esc == [1, 2, 1, 2], (num, top, esc)
+
+
+@prueba("Bridge (Windows), exportación a medias (26-nov-2026, revisión): los JPEG ya exportados se quedan (los "
+        "cortados se borran) y Bridge exporta solo los que faltan, desde una carpeta con enlaces que luego se borra",
+        solo_win="Bridge de Windows")
+def p85():
+    from types import SimpleNamespace
+    from rawflow import imagen_win as iw
+    base = td.fresh("p85")
+    dng, out = base / "2 DNGs", base / "3 Imagen AI"
+    for n in ("a", "b", "c-DxO_DeepPRIME XD3", "d"):
+        td.write(dng / f"{n}.dng", DNG_IMAGEN)
+    bueno = b"\xff\xd8" + b"J" * 2000 + b"\xff\xd9"
+    td.write(out / "a.jpg", bueno)
+    td.write(out / "b.jpg", b"\xff\xd8" + b"J" * 2000)               # cortado a medias: no vale
+    td.write(out / "c-DxO_DeepPRIME XD3.jpg", bueno)                 # de un intento sin terminar, pero completo
+    guardado = (iw._bridge_export_dir, iw.close_app)
+    llamadas = []
+
+    def exporta(s, d, o, expected, progress=lambda f: None):
+        llamadas.append((d, expected, sorted(p.name for p in d.glob("*.dng"))))
+        for p in d.glob("*.dng"):
+            (o / (core.dng_base(p) + ".jpg")).write_bytes(bueno)
+        return len(list(o.glob("*.jpg")))
+    try:
+        iw._bridge_export_dir, iw.close_app = exporta, lambda exe, wait=10: None
+        s = SimpleNamespace(log=lambda m: None)
+        a0 = (out / "a.jpg").stat().st_mtime_ns
+        assert iw.bridge_export(s, dng, out, 4) == 4
+        assert llamadas == [(dng / iw.MISSING_DIR, 2, ["b.dng", "d.dng"])], llamadas
+        assert not (dng / iw.MISSING_DIR).exists() and (out / "a.jpg").stat().st_mtime_ns == a0
+        assert sorted(p.name for p in out.glob("*.jpg")) == ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]
+        assert iw.bridge_export(s, dng, out, 4) == 4 and len(llamadas) == 1          # todo hecho: ni se abre Bridge
+        for p in out.glob("*.jpg"):
+            p.unlink()
+        assert iw.bridge_export(s, dng, out, 4) == 4 and llamadas[-1][:2] == (dng, 4)   # nada hecho: la carpeta tal cual
+    finally:
+        iw._bridge_export_dir, iw.close_app = guardado
+
+
+@prueba("Luminar (Windows), «Guardar como» (26-nov-2026, revisión): el nombre escrito se reconoce sin mirar tildes ni "
+        "mayúsculas", solo_win="Luminar de Windows")
+def p86():
+    from rawflow import luminar_win as lw
+    caja = lambda t: {"t": t, "x": 0, "y": 0, "w": 100, "h": 12}
+    p = Path("E:/Eventos/Boda José María/Boda José María.luminar")
+    assert lw._name_typed(p, [caja("Nombre de archivo:"), caja("E:\\Eventos\\BODA JOSE MARIA.luminar")])
+    assert lw._name_typed(p, [caja("boda josé maría")])
+    assert not lw._name_typed(p, [caja("Nombre de archivo:"), caja("Catálogo sin título")])
+
+
 def main() -> int:
     ok = saltadas = 0
     print(f"PRUEBAS DE RAWFLOW ({len(PRUEBAS)} casos)\n", flush=True)

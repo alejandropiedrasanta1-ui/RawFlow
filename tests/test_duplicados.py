@@ -1261,6 +1261,55 @@ def barrido_respeta_claude_y_sus_herramientas():
     assert sorted(vistos) == [200, 201], vistos
 
 
+@caso
+def pruebas_no_tocan_tus_ajustes_ni_tu_registro():
+    """26-nov-2026: al compilar, las pruebas escribían en el registro.log de verdad y cambiaban ajustes (la pantalla
+    donde se abre). En modo pruebas, registro y ajustes van a una carpeta temporal."""
+    from rawflow import app as ra
+    s = ra.user_settings()
+    assert s.format().name == "IniFormat" and "RawFlow-pruebas" in s.fileName(), s.fileName()
+    assert "RawFlow-pruebas" in str(ra.MainWindow.LOG), ra.MainWindow.LOG
+
+
+@caso
+def espacio_para_el_evento_entero():
+    """26-nov-2026: un evento ocupa ~3,2 veces sus RAW (medido en «25 nov 2026»: 31,4 → 99,3 GB). RawFlow pide eso y
+    un margen antes de copiar nada."""
+    from rawflow import app as ra
+    raw = 31.4 * 1024 ** 3
+    assert raw * ra.SPACE_FACTOR + ra.SPACE_MARGIN > 99.3 * 1024 ** 3
+
+
+@caso
+def copia_de_seguridad_de_lo_que_se_entrega():
+    """26-nov-2026: al terminar bien, las fotos finales y los videos se copian a la carpeta elegida; lo que ya estaba
+    no se repite, y nada queda a medias («.copiando»)."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from rawflow import app as ra
+    d = fresh("copia")
+    fin = d / "ev" / "5 Fotos finales Luminar"
+    pres = d / "ev" / "6 Presentación de fotos"
+    write(fin / "1.jpg", b"A" * 100)
+    write(fin / "2.jpg", b"B" * 200)
+    write(pres / "Presentación horizontal.mp4", b"V" * 300)
+    dest = d / "copia" / "ev"
+    res = []
+    w = ra.BackupWorker([fin, pres], dest)
+    w.done.connect(lambda ok, m: res.append((ok, m)))
+    w.run()                                            # (en el mismo hilo: sin esperar)
+    assert res and res[0][0], res
+    assert (dest / fin.name / "2.jpg").read_bytes() == b"B" * 200
+    assert (dest / pres.name / "Presentación horizontal.mp4").stat().st_size == 300
+    assert not list(dest.rglob("*.copiando"))
+    res.clear()
+    w2 = ra.BackupWorker([fin, pres], dest)
+    w2.done.connect(lambda ok, m: res.append((ok, m)))
+    w2.run()
+    assert res[0][0] and "3 ya estaban" in res[0][1], res
+
+
 def main() -> int:
     ok = 0
     for fn in RESULTS:
