@@ -2383,7 +2383,7 @@ def p83():
         iw.ws.windows = lambda title_part="", exe="": [w for w in (tapa, imagen) if not exe or w["exe"] == exe]
         iw.ws.foreground = lambda: {"hwnd": 1, "title": "", "exe": delante[0]}
         iw.ws.activate = lambda hwnd, maximize=True, primary=False: activadas.append(hwnd) or delante[0] == "ImagenAI.exe"
-        iw.ws.click = lambda x, y, n=1: clics.append((x, y))
+        iw.ws.click = lambda x, y, n=1, restore=True: clics.append((x, y))
         iw.ws.user32 = SimpleNamespace(ShowWindow=lambda h, c: minimizadas.append(h))   # «Claude» no se deja
         iw.diag = lambda *a, **k: None
         s = iw.Screen(logs.append)

@@ -48,11 +48,63 @@ def main() -> int:
     def bye(code: int = 0):
         user32.PostThreadMessageW(main_tid, WM_QUIT, 0, 0)
 
+    # 26-nov-2026 (modo tranquilo): con RawFlow trabajando en el monitor de la izquierda, una tecla de la persona
+    # que fuera a parar a ImagenAI, Bridge o Luminar (porque RawFlow los tenía delante un momento) podía hacer daño:
+    # Supr en Bridge manda fotos a la papelera. Esas teclas (las del teclado DE VERDAD, no las que manda RawFlow) se
+    # tragan y se avisa «FOCO» para que RawFlow le devuelva el teclado a su ventana al momento.
+    guard = {e.strip().lower() for e in os.environ.get("RAWFLOW_GUARD_EXES", "").split(",") if e.strip()}
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                    ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    exes: dict = {}
+    told = [0.0]
+
+    def fg_guarded() -> bool:
+        if not guard:
+            return False
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), ctypes.byref(pid))
+        if pid.value not in exes:
+            name = ""
+            h = kernel32.OpenProcess(0x1000, False, pid.value)
+            if h:
+                try:
+                    buf = ctypes.create_unicode_buffer(1024)
+                    n_ = wintypes.DWORD(1024)
+                    if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n_)):
+                        name = buf.value.rsplit("\\", 1)[-1].lower()
+                finally:
+                    kernel32.CloseHandle(h)
+            if len(exes) > 500:
+                exes.clear()
+            exes[pid.value] = name
+        return exes[pid.value] in guard
+
     @HOOKPROC
     def kb(n, wparam, lparam):
         if n == 0:
             k = KBD.from_address(lparam)
             injected = bool(k.flags & LLKHF_INJECTED) and not state["test_injected"]
+            if not injected and fg_guarded():
+                try:
+                    if wparam in (WM_KEYDOWN, WM_SYSKEYDOWN) and time.monotonic() - told[0] > 0.3:
+                        told[0] = time.monotonic()
+                        print("FOCO", flush=True)
+                except Exception:  # noqa: BLE001
+                    pass
+                if k.vkCode == VK_ESCAPE and wparam in (WM_KEYDOWN, WM_SYSKEYDOWN) and not state["held"]:
+                    now = time.monotonic()                   # (Esc ×3 sigue cancelando aunque se trague)
+                    state["esc"] = [t for t in state["esc"] if now - t < 2.5] + [now]
+                    if len(state["esc"]) >= 3:
+                        state["esc"] = []
+                        print("CANCEL", flush=True)
+                        threading.Timer(0.05, bye).start()
+                state["held"] = k.vkCode == VK_ESCAPE and wparam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+                return 1                                     # tragada: no llega a la app que maneja RawFlow
             if not injected and k.vkCode == VK_ESCAPE:
                 if wparam in (WM_KEYDOWN, WM_SYSKEYDOWN):
                     if not state["held"]:                     # mantener Esc no cuenta (autorrepetición)
@@ -65,7 +117,7 @@ def main() -> int:
                     state["held"] = True
                 elif wparam in (WM_KEYUP, WM_SYSKEYUP):
                     state["held"] = False
-        return user32.CallNextHookEx(None, n, wparam, lparam)     # TODAS las teclas siguen su camino: nada se bloquea
+        return user32.CallNextHookEx(None, n, wparam, lparam)     # las demás siguen su camino tal cual
 
     hmod = kernel32.GetModuleHandleW(None)
     hk = user32.SetWindowsHookExW(WH_KEYBOARD_LL, kb, hmod, 0)

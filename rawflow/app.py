@@ -2200,7 +2200,7 @@ class MainWindow(QMainWindow):
         self.pipe.finished_all.connect(self._log_end)
         self._log(f"=== EVENTO {event}  ({self.run_n} fotos, desde el paso {start + 1})")
         # pantalla completa de proceso (el ratón y el teclado ya NO se bloquean: solo se escucha Esc ×3 para cancelar)
-        self.runscreen.target = self.screen()                  # la pantalla de proceso, donde está la ventana
+        self.runscreen.target = self._work_screen()            # la pantalla de proceso (Windows con 2+: la izquierda)
         self.runscreen.open(event.name, f"{self.run_n:,} fotos  ·  {event}", start)
         self.stopbtn.open(self.runscreen.target)
         for w in (self.runscreen, self.mini, self.curtain, self.stopbtn):     # Windows: no tapan lo que RawFlow lee por debajo
@@ -2453,6 +2453,12 @@ class MainWindow(QMainWindow):
         summary = self.pipe.summary if self.pipe else {}
         self.pipe = None
         self.stopbtn.hide()
+        if sys.platform == "win32":                    # fin del modo tranquilo: el ratón y el teclado, como siempre
+            try:
+                from . import winscreen
+                winscreen.set_work(None, quiet=False)
+            except Exception:  # noqa: BLE001
+                pass
         self.clock.stop()
         self.inputlock.release()
         self.runscreen.esc = False
@@ -2490,6 +2496,31 @@ class MainWindow(QMainWindow):
                 self._log(f"⚠ No se pudo empezar la copia de seguridad ({e})")
         self.runscreen.finish(not err, title, text, lambda: self._after_finish(event, err, summary),
                               hold=2.8 if not err else 2.0)
+
+    def _work_screen(self):
+        """26-nov-2026, el usuario: «usa el monitor del lado izquierdo… todo abajo de la pantalla de proceso… y el otro
+        monitor libre». Windows con dos o más monitores: la pantalla de proceso va al de la IZQUIERDA y las apps que
+        maneja RawFlow trabajan debajo de ella (winscreen, modo tranquilo). Con uno solo, como siempre."""
+        scr = self.screen()
+        try:
+            from . import winscreen
+        except Exception:  # noqa: BLE001
+            return scr
+        screens = QApplication.screens()
+        if sys.platform != "win32" or len(screens) < 2 or os.environ.get("RAWFLOW_SIN_APPS") == "1":
+            try:
+                winscreen.set_work(None, quiet=False)
+            except Exception:  # noqa: BLE001
+                pass
+            return scr
+        left = min(screens, key=lambda s: (s.geometry().x(), s.geometry().y()))
+        try:
+            mons = winscreen.monitors()
+            winscreen.set_work(mons[0] if mons else None, quiet=True)      # el de más a la izquierda (píxeles reales)
+            self._log(f"    Modo tranquilo: todo en el monitor de la izquierda ({left.name()}); el otro queda libre")
+        except Exception as e:  # noqa: BLE001
+            self._log(f"    (modo tranquilo no disponible: {e})")
+        return left
 
     def _notify_done(self, ok: bool, title: str, text: str) -> None:
         """26-nov-2026: aviso al terminar (o pararse) el evento, para no tener que estar mirando: sonido del sistema,

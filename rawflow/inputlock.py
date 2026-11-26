@@ -19,6 +19,9 @@ from PySide6.QtCore import QThread, Signal
 from . import core
 
 MAX_RESTARTS = 30
+# Windows, modo tranquilo (26-nov-2026): las apps que maneja RawFlow. Si la persona teclea con una de ellas delante,
+# winlock se traga la tecla (no llega: Supr en Bridge borraría fotos) y avisa «FOCO» → el teclado vuelve a su ventana.
+GUARD_EXES = ("imagenai.exe", "adobe bridge.exe", "luminar neo.exe")
 
 
 class InputLock(QThread):
@@ -46,8 +49,12 @@ class InputLock(QThread):
                 cmd = [w if os.path.exists(w) else exe, "-m", "rawflow.winlock"]
                 cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        env = None
+        if core.SYSTEM == "Windows":             # modo tranquilo: las teclas de la persona no llegan a estas apps
+            import os as _os
+            env = dict(_os.environ, RAWFLOW_GUARD_EXES=",".join(GUARD_EXES))
         p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                             text=True, bufsize=1, cwd=cwd, creationflags=flags)
+                             text=True, bufsize=1, cwd=cwd, creationflags=flags, env=env)
         first = (p.stdout.readline() or "").strip()             # «LISTENING …» o «ERROR …»
         if not first.startswith("LISTENING"):                   # (jamás se acepta un «BLOCKING»: nada debe bloquear)
             self._kill(p)
@@ -101,6 +108,12 @@ class InputLock(QThread):
                     if "CANCEL" in line:
                         cancelled = True
                         self.cancel.emit()
+                    elif "FOCO" in line:                # tecleó con una app de RawFlow delante: su teclado, de vuelta
+                        try:
+                            from . import winscreen
+                            winscreen.give_back_now()
+                        except Exception:  # noqa: BLE001
+                            pass
             except Exception:  # noqa: BLE001
                 pass
             try:

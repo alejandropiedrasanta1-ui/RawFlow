@@ -246,6 +246,278 @@ class _INPUT(ctypes.Structure):
 def _send(*inputs: _INPUT) -> None:
     arr = (_INPUT * len(inputs))(*inputs)
     user32.SendInput(len(inputs), arr, ctypes.sizeof(_INPUT))
+    _OURS[0] = kernel32.GetTickCount()            # lo último que «tocó» el equipo fue RawFlow, no la persona
+
+
+# ------------------------------------------------------------------ modo tranquilo (26-nov-2026, pedido del usuario)
+# «Usa el monitor del lado izquierdo… todo abajo de la pantalla de proceso… y el otro monitor libre, que pueda
+# manejar el mouse sin que me lo andes cambiando». Con QUIET:
+#   · WORK: el monitor de trabajo (el de la pantalla de proceso). Las apps que maneja RawFlow (y sus diálogos) se
+#     llevan y se maximizan AHÍ, debajo de la pantalla de proceso (que no sale en las capturas: se leen igual).
+#   · antes de cada clic se espera a que la persona no esté moviendo el ratón ni tecleando, y el cursor vuelve al
+#     instante a donde estaba;
+#   · el teclado se le devuelve a su ventana en cuanto RawFlow lleva un rato sin tocar nada (o en cuanto ella mueve
+#     el ratón o teclea), para que lo que escriba no acabe en Luminar.
+QUIET = [False]
+WORK: List[Optional[Tuple[int, int, int, int]]] = [None]      # (x, y, ancho, alto) en píxeles reales
+APP_EXES: set = set()                                          # .exe que maneja RawFlow (en minúsculas)
+_OURS = [0]                                                    # GetTickCount de lo último que mandó RawFlow
+IDLE_MS = 400                                                  # quieto al menos esto antes de un clic
+GIVE_BACK_S = 3.0                                              # sin acciones de RawFlow esto → teclado a la persona
+# (revisión 26-nov-2026: con 0,6-2 s y «en cuanto mueva el ratón» se cerraban los menús ENTRE dos pasos —Archivo →
+# Exportar a—. Ahora solo tras 3 s sin acciones y nunca con un menú abierto; si la persona TECLEA con una app de
+# RawFlow delante, winlock se traga la tecla y pide give_back_now(): eso protege de verdad.)
+_FOCUS = {"user": None, "last": 0.0, "thread": None, "busy": 0}
+_FLOCK = threading.RLock()                                     # nada de devolver el teclado a mitad de una acción
+if sys.platform == "win32":
+    kernel32.GetTickCount.restype = wintypes.DWORD             # (era c_long: negativo tras 24,8 días encendido)
+_MODS = (0x01, 0x02, 0x04, 0x10, 0x11, 0x12, 0x5B, 0x5C)       # botones del ratón · Mayús · Ctrl · Alt · Windows
+
+
+def monitors() -> List[Tuple[int, int, int, int]]:
+    """Rectángulos (x, y, ancho, alto) de cada monitor, en píxeles reales, de izquierda a derecha."""
+    dpi_aware()
+    out: List[Tuple[int, int, int, int]] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC, ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+    def each(_h, _dc, r, _l):
+        out.append((r.contents.left, r.contents.top, r.contents.right - r.contents.left,
+                    r.contents.bottom - r.contents.top))
+        return True
+    user32.EnumDisplayMonitors(None, None, each, 0)
+    return sorted(out)
+
+
+def set_work(rect: Optional[Tuple[int, int, int, int]], quiet: bool = True) -> None:
+    with _FLOCK:
+        WORK[0] = rect
+        QUIET[0] = bool(quiet and rect)
+        _FOCUS["user"], _FOCUS["last"], _FOCUS["busy"] = None, 0.0, 0
+        _SAVED[0] = None
+
+
+def _inside(rect, x: float, y: float) -> bool:
+    return rect is not None and rect[0] <= x < rect[0] + rect[2] and rect[1] <= y < rect[1] + rect[3]
+
+
+class _LII(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+
+def _held() -> bool:
+    """¿La persona tiene apretado un botón del ratón (arrastrando algo) o Mayús/Ctrl/Alt/Windows?"""
+    try:
+        return any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in _MODS)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def user_active(ms: int = IDLE_MS) -> bool:
+    """¿La persona ha movido el ratón, pulsado un botón o tecleado hace menos de `ms`? (lo que manda RawFlow no
+    cuenta). También si tiene algo apretado (ver _held)."""
+    try:
+        lii = _LII(ctypes.sizeof(_LII), 0)
+        user32.GetLastInputInfo(ctypes.byref(lii))
+        now = kernel32.GetTickCount()
+        # Lo último lo mandó RawFlow si ocurrió hasta 400 ms después de su último envío (Windows apunta las teclas
+        # inyectadas un poco DESPUÉS de mandarlas; con 60 ms se tomaban por de la persona. Prueba en vivo, 26-nov).
+        after_ours = (lii.dwTime - _OURS[0]) & 0xFFFFFFFF
+        mine = after_ours <= 400
+        return _held() or (not mine and ((now - lii.dwTime) & 0xFFFFFFFF) < ms)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def wait_user_idle(max_s: float = 4.0, should_stop=None) -> None:
+    """Espera a que la persona deje quieto el ratón y el teclado un momento (como mucho `max_s`). Si tiene un botón o
+    Mayús/Ctrl/Alt APRETADOS se espera lo que haga falta: un clic de RawFlow a mitad de un arrastre soltaría lo que
+    arrastra en la otra pantalla, y un texto con Ctrl apretado serían atajos (revisión 26-nov-2026)."""
+    if not QUIET[0]:
+        return
+    t0 = time.monotonic()
+    while True:
+        if should_stop is not None and should_stop():
+            raise RuntimeError("Cancelado.")
+        if _held():
+            time.sleep(0.05)
+            continue
+        if not user_active() or time.monotonic() - t0 >= max_s:
+            return
+        time.sleep(0.05)
+
+
+class _PT(ctypes.Structure):
+    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+
+def cursor_pos() -> Tuple[int, int]:
+    p = _PT()
+    user32.GetCursorPos(ctypes.byref(p))
+    return p.x, p.y
+
+
+def _set_cursor(x: int, y: int) -> None:
+    user32.SetCursorPos(int(x), int(y))
+
+
+def _exe_of_hwnd(hwnd) -> Tuple[int, str]:
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+    h = kernel32.OpenProcess(0x1000, False, pid.value)
+    name = ""
+    if h:
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            n = wintypes.DWORD(1024)
+            if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)):
+                name = buf.value.rsplit("\\", 1)[-1].lower()
+        finally:
+            kernel32.CloseHandle(h)
+    return pid.value, name
+
+
+def _force_foreground(hwnd) -> bool:
+    """SetForegroundWindow «con permiso»: se engancha un momento a la cola de entrada de la ventana de delante (así
+    Windows lo deja) en vez de mandar un toque de Alt, que en la ventana de la persona abría su menú. Nunca con una
+    ventana colgada (engancharse a ella podría dejar a RawFlow esperando)."""
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    fg = user32.GetForegroundWindow()
+    if fg == hwnd:
+        return True
+    try:
+        if user32.IsHungAppWindow(wintypes.HWND(hwnd)) or (fg and user32.IsHungAppWindow(wintypes.HWND(fg))):
+            user32.SetForegroundWindow(hwnd)
+            return user32.GetForegroundWindow() == hwnd
+    except Exception:  # noqa: BLE001
+        pass
+    me = kernel32.GetCurrentThreadId()
+    other = user32.GetWindowThreadProcessId(wintypes.HWND(fg), None) if fg else 0
+    attached = bool(other and other != me and user32.AttachThreadInput(me, other, True))
+    try:
+        user32.BringWindowToTop(wintypes.HWND(hwnd))
+        user32.SetForegroundWindow(hwnd)
+    finally:
+        if attached:
+            user32.AttachThreadInput(me, other, False)
+    return user32.GetForegroundWindow() == hwnd
+
+
+def begin_action(should_stop=None) -> None:
+    """Antes de que RawFlow pulse o escriba: recuerda la ventana de la persona (la de delante, si no es de RawFlow
+    ni de las apps que maneja) para devolverle el teclado después, y espera a que esté quieta."""
+    if not QUIET[0]:
+        return
+    import os as _os
+    with _FLOCK:                              # mientras RawFlow pulsa o escribe, el teclado NO se devuelve
+        _FOCUS["busy"] += 1
+        _FOCUS["last"] = time.monotonic()
+        fg = user32.GetForegroundWindow()
+        if fg:
+            pid, exe = _exe_of_hwnd(fg)
+            if pid != _os.getpid() and exe not in APP_EXES:
+                _FOCUS["user"] = fg
+    wait_user_idle(should_stop=should_stop)
+
+
+def windows_title(hwnd) -> str:
+    buf = ctypes.create_unicode_buffer(256)
+    user32.GetWindowTextW(wintypes.HWND(hwnd), buf, 256)
+    return buf.value
+
+
+def end_action() -> None:
+    """Después de pulsar o escribir: el teclado vuelve a la persona cuando RawFlow lleve GIVE_BACK_S sin tocar nada
+    y no haya un menú abierto (ver _give_back)."""
+    if not QUIET[0]:
+        return
+    with _FLOCK:
+        _FOCUS["last"] = time.monotonic()
+        _FOCUS["busy"] = max(0, _FOCUS["busy"] - 1)
+        th = _FOCUS["thread"]
+        if th is None or not th.is_alive():
+            th = threading.Thread(target=_give_back_loop, daemon=True, name="teclado-a-la-persona")
+            _FOCUS["thread"] = th
+            th.start()
+
+
+class _GTI(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD), ("hwndActive", wintypes.HWND),
+                ("hwndFocus", wintypes.HWND), ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND), ("rcCaret", wintypes.RECT)]
+
+
+def _in_menu(hwnd) -> bool:
+    """¿La app tiene un menú abierto ahora mismo? (GUI_INMENUMODE / GUI_POPUPMENUMODE / GUI_SYSTEMMENUMODE)"""
+    try:
+        tid = user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), None)
+        g = _GTI()
+        g.cbSize = ctypes.sizeof(_GTI)
+        return bool(user32.GetGUIThreadInfo(tid, ctypes.byref(g)) and g.flags & (0x4 | 0x8 | 0x10))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _give_back(now_: bool) -> bool:
+    """Devuelve el teclado a la ventana de la persona si una app de RawFlow lo tiene. `now_`: aunque no hayan pasado
+    GIVE_BACK_S (la persona tecleó con la app delante: winlock se tragó la tecla y avisó)."""
+    with _FLOCK:
+        if not QUIET[0] or _FOCUS["busy"]:
+            return False
+        last, user = _FOCUS["last"], _FOCUS["user"]
+        if not user or (not now_ and (not last or time.monotonic() - last < GIVE_BACK_S)):
+            return False
+        try:
+            fg = user32.GetForegroundWindow()
+            if not fg or fg == user or _exe_of_hwnd(fg)[1] not in APP_EXES:
+                _FOCUS["last"] = 0.0
+                return False
+            if not now_ and _in_menu(fg):            # menú abierto: RawFlow está a mitad de algo
+                return False
+            if user32.IsWindow(wintypes.HWND(user)):
+                _FOCUS["last"] = 0.0
+                return _force_foreground(user)
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
+def give_back_now() -> None:
+    """winlock avisó «FOCO»: la persona tecleó con una app de RawFlow delante (la tecla se tragó)."""
+    _give_back(True)
+
+
+def _give_back_loop() -> None:
+    while QUIET[0]:
+        time.sleep(0.2)
+        if QUIET[0]:
+            _give_back(False)
+
+
+def keep_on_work(exe: str) -> int:
+    """Las ventanas de `exe` que estén fuera del monitor de trabajo (un diálogo que se abrió en el otro, la app
+    recién abierta) se llevan a él. Devuelve cuántas movió."""
+    r = WORK[0]
+    if not QUIET[0] or r is None:
+        return 0
+    user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                    ctypes.c_int, wintypes.UINT]
+    n = 0
+    for w in windows(exe=exe):
+        if w["min"]:
+            continue
+        x, y, ww, hh = w["rect"]
+        if _inside(r, x + ww / 2, y + hh / 2):
+            continue
+        big = ww > 900
+        if big:
+            user32.ShowWindow(w["hwnd"], 9)                     # SW_RESTORE (una maximizada no se deja mover)
+        nw, nh = min(ww, r[2] - 40), min(hh, r[3] - 40)
+        user32.SetWindowPos(w["hwnd"], None, r[0] + (r[2] - nw) // 2, r[1] + (r[3] - nh) // 2, nw, nh,
+                            0x0004 | 0x0010)                    # NOZORDER | NOACTIVATE
+        if big:
+            user32.ShowWindow(w["hwnd"], 3)                     # SW_MAXIMIZE (en el monitor de trabajo)
+        n += 1
+    return n
 
 
 def _mouse(flags: int, x: int = 0, y: int = 0, data: int = 0) -> _INPUT:
@@ -284,7 +556,13 @@ def _out_of_the_way(x: float, y: float) -> List[int]:
     return hidden
 
 
-def click(x: float, y: float, n: int = 1, right: bool = False) -> None:
+def click(x: float, y: float, n: int = 1, right: bool = False, restore: bool = True) -> None:
+    """`restore=False`: el cursor se queda (submenús que se abren al pasar por encima, como los de Luminar); quien
+    llama lo devuelve al acabar con restore_cursor()."""
+    wait_user_idle()                                   # modo tranquilo: no a mitad de que la persona mueva el ratón
+    if QUIET[0] and _SAVED[0] is None:
+        _SAVED[0] = cursor_pos()                       # …y el cursor vuelve a donde lo tenía
+    back = _SAVED[0] if (QUIET[0] and restore) else None
     hidden = _out_of_the_way(x, y)
     try:
         move(x, y)
@@ -297,16 +575,34 @@ def click(x: float, y: float, n: int = 1, right: bool = False) -> None:
             if i < n - 1:
                 time.sleep(0.08)
     finally:
+        if back is not None:
+            restore_cursor()
         if hidden:
             time.sleep(0.15)
             for hwnd in hidden:
                 user32.ShowWindow(hwnd, 4)                          # SW_SHOWNOACTIVATE: vuelve sin coger el foco
 
 
+_SAVED: List[Optional[Tuple[int, int]]] = [None]     # dónde tenía la persona el cursor antes de los clics
+
+
+def restore_cursor() -> None:
+    """El cursor vuelve a donde lo tenía la persona (si lo tenía en otro monitor que el de trabajo)."""
+    back, _SAVED[0] = _SAVED[0], None
+    if back is not None and QUIET[0] and not _inside(WORK[0], *back):
+        time.sleep(0.03)                               # (el clic ya entró) → el cursor, a su sitio en el otro monitor
+        _set_cursor(*back)
+
+
 def scroll(x: float, y: float, clicks: int) -> None:
+    wait_user_idle()
+    back = cursor_pos() if QUIET[0] else None
     move(x, y)
     time.sleep(0.05)
     _send(_mouse(0x0800, data=clicks * 120))
+    if back is not None and not _inside(WORK[0], *back):
+        time.sleep(0.03)
+        _set_cursor(*back)
 
 
 VK = {"enter": 0x0D, "esc": 0x1B, "tab": 0x09, "space": 0x20, "backspace": 0x08, "delete": 0x2E, "home": 0x24,
@@ -328,8 +624,18 @@ def _key(vk: int, up: bool = False) -> _INPUT:
     return _INPUT(1, _U(ki=_KI(vk, 0, (0x0002 if up else 0) | (0x0001 if vk in _EXT else 0), 0, None)))
 
 
-def keys(combo: str) -> None:
-    """Atajo tipo «ctrl+a», «ctrl+shift+e», «enter», «alt+f4»."""
+class FocusLost(RuntimeError):
+    """Modo tranquilo: la app dejó de estar delante a mitad de unas teclas (la persona pulsó en su ventana)."""
+
+
+def _guard(guard) -> None:
+    if guard is not None and not guard():
+        raise FocusLost("la ventana cambió mientras RawFlow escribía")
+
+
+def keys(combo: str, guard=None) -> None:
+    """Atajo tipo «ctrl+a», «ctrl+shift+e», «enter», «alt+f4». `guard()`: falso → se para (no escribe en otra)."""
+    _guard(guard)
     parts = [_vk(p.strip()) for p in combo.split("+") if p.strip()]
     for vk in parts:
         _send(_key(vk))
@@ -339,9 +645,12 @@ def keys(combo: str) -> None:
         time.sleep(0.02)
 
 
-def type_text(text: str, delay: float = 0.004) -> None:
-    """Escribe el texto tal cual (Unicode), sin depender de la distribución del teclado."""
-    for ch in text:
+def type_text(text: str, delay: float = 0.004, guard=None) -> None:
+    """Escribe el texto tal cual (Unicode), sin depender de la distribución del teclado. `guard()` se mira antes de
+    cada letra: si deja de ser verdad (la persona pulsó en su ventana), se para en vez de escribir en la suya."""
+    for k, ch in enumerate(text):
+        if k % 4 == 0:
+            _guard(guard)
         if ch == "\n":
             keys("enter")
             continue
@@ -450,16 +759,22 @@ def activate(hwnd: int, maximize: bool = True, primary: bool = False) -> bool:
         r = wintypes.RECT()
         user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
         user32.GetWindowRect(hwnd, ctypes.byref(r))
-        pw, ph = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+        # modo tranquilo: al monitor de TRABAJO (el de la pantalla de proceso); si no, a la pantalla principal
+        tx, ty, tw, th = WORK[0] if (QUIET[0] and WORK[0]) else (0, 0, user32.GetSystemMetrics(0),
+                                                                user32.GetSystemMetrics(1))
         cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
-        if not (0 <= cx < pw and 0 <= cy < ph):                     # está en otra pantalla
+        if not (tx <= cx < tx + tw and ty <= cy < ty + th):         # está en otra pantalla
             user32.ShowWindow(hwnd, 9)                              # SW_RESTORE (una maximizada no se deja mover)
-            user32.SetWindowPos(hwnd, None, 60, 60, min(1600, pw - 120), min(900, ph - 120), 0x0004 | 0x0010)
+            user32.SetWindowPos(hwnd, None, tx + 60, ty + 60, min(1600, tw - 120), min(900, th - 120),
+                                0x0004 | 0x0010)
             time.sleep(0.3)
     user32.ShowWindow(hwnd, 3 if maximize else 9)                   # SW_MAXIMIZE / SW_RESTORE
     if user32.GetForegroundWindow() != hwnd:
-        _send(_key(0x12), _key(0x12, True))                         # un toque de Alt: Windows deja cambiar de ventana
-        user32.SetForegroundWindow(hwnd)
+        if QUIET[0]:
+            _force_foreground(hwnd)                                 # sin el toque de Alt: abría el menú de la
+        else:                                                       # ventana de la persona
+            _send(_key(0x12), _key(0x12, True))                     # un toque de Alt: Windows deja cambiar de ventana
+            user32.SetForegroundWindow(hwnd)
     time.sleep(0.4)
     return user32.GetForegroundWindow() == hwnd
 

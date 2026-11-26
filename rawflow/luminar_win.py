@@ -176,13 +176,26 @@ def _open(s, log: Log) -> None:
 
 def _menu(s, *path: str, then: str = "") -> None:
     """Menú del logo «luminar» → Archivo → … Los submenús de Luminar se abren al PASAR el ratón: tras cada clic se
-    comprueba que se ve lo siguiente (path[i+1] o `then`) y, si no, se vuelve a poner el ratón sobre ese elemento."""
+    comprueba que se ve lo siguiente (path[i+1] o `then`) y, si no, se vuelve a poner el ratón sobre ese elemento.
+    Modo tranquilo (26-nov-2026): todo el recorrido cuenta como UNA acción (el teclado no se devuelve a mitad, que
+    cerraría el menú) y el cursor se queda en el menú hasta el final (si volviera a su sitio tras cada clic, el
+    submenú no se abriría); al acabar vuelve a donde lo tenía la persona."""
+    from . import winscreen as ws
+    ws.begin_action(s.should_stop)
+    try:
+        _menu_walk(s, path, then)
+    finally:
+        ws.end_action()
+        ws.restore_cursor()
+
+
+def _menu_walk(s, path, then: str) -> None:
     from . import imagen_win as iw
     for _ in range(8):                               # (con un catálogo grande, Luminar tarda en responder al abrir)
         s.front(force=True)                          # Luminar delante (otra ventana o Alt+Tab se llevan el clic)
         if s.find("Archivo", exact=True, region=(0, 0.04, 0.08, 0.12)):
             break
-        s.click(s.rect[0] + 0.033 * s.rect[2], s.rect[1] + 0.033 * s.rect[3])   # el logo (arriba a la izquierda)
+        s.click(s.rect[0] + 0.033 * s.rect[2], s.rect[1] + 0.033 * s.rect[3], restore=False)   # el logo
         t0 = time.time()
         while time.time() - t0 < 4 and not s.find("Archivo", exact=True, region=(0, 0.04, 0.08, 0.12)):
             time.sleep(0.4)
@@ -194,7 +207,7 @@ def _menu(s, *path: str, then: str = "") -> None:
             if not hits:
                 break
             b = min(hits, key=lambda q: q["x"]) if not i else max(hits, key=lambda q: q["x"])
-            s.click_box(b, after=0.9)
+            s.click_box(b, after=0.9, restore=False)
             if not nxt or any(q["x"] > b["x"] + b["w"] and q["y"] > s.rect[1] + 0.05 * s.rect[3]
                               for q in s.find(nxt, boxes=s.ocr())):
                 break                                # se abrió su submenú (lo siguiente está a su derecha, no
@@ -313,7 +326,18 @@ def _apply_preset(s, log: Log, name: Optional[str] = None) -> None:
 
 
 def _acciones(s, item: str) -> None:
-    """Botón «Acciones» (arriba) → Ajustes → `item` («Copiar Ajustes», «Pegar Ajustes»…)."""
+    """Botón «Acciones» (arriba) → Ajustes → `item` («Copiar Ajustes», «Pegar Ajustes»…). Modo tranquilo: como
+    _menu, todo es UNA acción y el cursor se queda en el menú hasta el final."""
+    from . import winscreen as ws
+    ws.begin_action(s.should_stop)
+    try:
+        _acciones_walk(s, item)
+    finally:
+        ws.end_action()
+        ws.restore_cursor()
+
+
+def _acciones_walk(s, item: str) -> None:
     from . import imagen_win as iw
     for _ in range(3):
         s.front(force=True)
@@ -322,10 +346,10 @@ def _acciones(s, item: str) -> None:
             aj = [b for b in s.find("Ajustes", exact=True) if b["y"] > s.rect[1] + 0.06 * s.rect[3]]
             if not aj:
                 break
-            s.click_box(min(aj, key=lambda b: b["y"]), after=0.9)   # (pasar por encima abre su submenú)
+            s.click_box(min(aj, key=lambda b: b["y"]), after=0.9, restore=False)   # (pasar por encima abre su submenú)
             it = s.find(item, exact=True)
             if it:
-                s.click_box(it[0], after=1.2)
+                s.click_box(it[0], after=1.2, restore=False)
                 return
         s.esc()
         time.sleep(1)

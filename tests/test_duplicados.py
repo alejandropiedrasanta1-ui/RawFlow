@@ -1310,6 +1310,41 @@ def copia_de_seguridad_de_lo_que_se_entrega():
     assert res[0][0] and "3 ya estaban" in res[0][1], res
 
 
+@caso
+def modo_tranquilo_monitor_izquierdo():
+    """26-nov-2026, el usuario: «todo en el monitor de la izquierda, debajo de la pantalla de proceso, y el otro libre;
+    que no me cambies el ratón». Lo que no necesita apps abiertas: se activa y se apaga, el teclado no se devuelve
+    a mitad de una acción, lo que manda RawFlow no cuenta como «la persona está usando el ratón», y sin modo
+    tranquilo nada cambia (ni espera ni mueve nada). La prueba con ventanas de verdad se hizo en vivo."""
+    if sys.platform != "win32":
+        return
+    import time
+    from rawflow import winscreen as ws
+    mons = ws.monitors()
+    assert mons and all(m[2] > 0 and m[3] > 0 for m in mons) and mons == sorted(mons), mons
+    ws.set_work(None, quiet=False)
+    assert not ws.QUIET[0]
+    t0 = time.monotonic()
+    ws.wait_user_idle()                                   # sin modo tranquilo: no espera nada
+    ws.begin_action(); ws.end_action()
+    assert time.monotonic() - t0 < 0.05 and not ws._FOCUS["busy"]
+    assert ws.keep_on_work("notepad.exe") == 0
+    ws.set_work(mons[0], quiet=True)
+    try:
+        assert ws.QUIET[0] and ws.WORK[0] == mons[0]
+        ws._FOCUS["user"] = None
+        ws.begin_action()
+        assert ws._FOCUS["busy"]                         # durante la acción el teclado no se devuelve
+        ws._send(ws._key(0x87), ws._key(0x87, True))      # (F24: nadie la usa) → lo último lo mandó RawFlow
+        time.sleep(0.05)
+        assert not ws.user_active(400), "lo que manda RawFlow no es la persona"
+        ws.end_action()
+        assert not ws._FOCUS["busy"] and ws._FOCUS["last"] > 0
+    finally:
+        ws.set_work(None, quiet=False)
+    assert not ws.QUIET[0] and ws.WORK[0] is None
+
+
 def main() -> int:
     ok = 0
     for fn in RESULTS:

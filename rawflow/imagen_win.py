@@ -81,6 +81,10 @@ class Screen:
         self._last = ("", [])
         self._fcheck = 0.0
         self._blind = False           # True: la última vez Windows no dejó la ventana delante (no se pulsa a ciegas)
+        try:
+            ws.APP_EXES.add(exe.lower())  # modo tranquilo: sus ventanas van al monitor de trabajo y no son «de la persona»
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---- ventana
     def window(self) -> Optional[dict]:
@@ -111,10 +115,14 @@ class Screen:
             if o["hwnd"] == w["hwnd"]:
                 break
             exe = (o.get("exe") or "").lower()
-            if o["min"] or not exe or exe == self.exe.lower() or exe in self._SYSTEM:
+            system = self._SYSTEM if not ws.QUIET[0] else tuple(e for e in self._SYSTEM if e not in (
+                "explorer.exe", "applicationframehost.exe"))     # (modo tranquilo: ya no se pone delante para leer:
+            if o["min"] or not exe or exe == self.exe.lower() or exe in system:   # una carpeta abierta la taparía)
                 continue
             if o.get("pid") == os.getpid():                      # RawFlow misma (también desde el código, con
                 continue                                         # python.exe): su pantalla y su botón «Parar» no
+            if exe == "explorer.exe" and not o.get("title"):     # (el escritorio y la barra de tareas, nunca)
+                continue
             ox, oy, ow, oh = o["rect"]
             ix, iy = min(x + ww, ox + ow) - max(x, ox), min(y + hh, oy + oh) - max(y, oy)
             if ix > 0 and iy > 0 and ix * iy > 0.03 * ww * hh:
@@ -154,6 +162,7 @@ class Screen:
         if self.should_stop():
             raise UIError("Cancelado.")
         self._fcheck = time.time()
+        ws.keep_on_work(self.exe)                  # modo tranquilo: sus ventanas, en el monitor de trabajo
         self._uncover()
         if self._is_front():
             self._blind = False
@@ -206,7 +215,18 @@ class Screen:
     # ---- leer
     def ocr(self, scale: int = 1) -> List[dict]:
         try:
-            self.front()
+            if ws.QUIET[0]:
+                # modo tranquilo: para LEER no hace falta tenerla delante (está debajo de la pantalla de proceso, que
+                # no sale en la captura); no se le quita el teclado a la persona. Solo en su monitor y destapada.
+                if time.time() - self._fcheck >= 1.5:
+                    self._fcheck = time.time()
+                    ws.keep_on_work(self.exe)
+                    self._uncover()
+                    w0 = self.window()
+                    if w0 is None and (self.main_window() or {}).get("min"):
+                        self.front(force=True)     # minimizada: hay que devolverla a su sitio
+            else:
+                self.front()
         except Exception:  # noqa: BLE001
             pass
         w = self.window()
@@ -253,13 +273,60 @@ class Screen:
         raise UIError(f"No apareció «{' / '.join(texts)}» en pantalla.")
 
     # ---- tocar
-    def click(self, x: float, y: float, n: int = 1) -> None:
-        self._sure_front()
-        ws.click(x, y, n)
+    def _ready(self) -> None:
+        """Antes de pulsar o escribir. Modo tranquilo: recuerda la ventana de la persona, espera a que esté quieta,
+        trae la app delante solo si no lo está y vuelve a mirar que la persona siga quieta JUSTO antes de actuar (el
+        teclado se le devuelve después: ws.end_action)."""
+        ws.begin_action(self.should_stop)
+        if ws.QUIET[0]:
+            if not self._is_front():
+                self.front(force=True)
+            ws.wait_user_idle(1.0, self.should_stop)
+        else:
+            self._sure_front()
 
-    def click_box(self, b: dict, after: float = 0.8) -> None:
-        self._sure_front()
-        ws.click(b["x"] + b["w"] / 2, b["y"] + b["h"] / 2)
+    def _guard(self):
+        """Modo tranquilo: mientras se escribe, la app sigue delante (si la persona pulsa en su ventana, se para)."""
+        return self._is_front if ws.QUIET[0] else None
+
+    def _act(self, fn) -> None:
+        """Una acción de ratón o teclado con su antes y su después; si la persona se llevó el foco a mitad, UIError
+        (se repite el intento) en vez de seguir escribiendo en su ventana. (Revisión 26-nov-2026: si front() fallaba,
+        end_action no se llamaba y el teclado ya no se le devolvía nunca.)"""
+        try:
+            self._ready()
+            fn()
+        except ws.FocusLost as e:
+            raise UIError(f"Se interrumpió: {e}.")
+        finally:
+            ws.end_action()
+
+    def holding(self):
+        """`with s.holding():` varias acciones seguidas (un menú) cuentan como UNA: el teclado no se le devuelve a la
+        persona a mitad (cerraría el menú) y el cursor no vuelve a su sitio hasta el final."""
+        import contextlib
+        scr = self
+
+        @contextlib.contextmanager
+        def _cm():
+            ws.begin_action(scr.should_stop)
+            scr._hold = getattr(scr, "_hold", 0) + 1
+            try:
+                yield
+            finally:
+                scr._hold -= 1
+                ws.end_action()
+                if not scr._hold:
+                    ws.restore_cursor()
+        return _cm()
+
+    def click(self, x: float, y: float, n: int = 1, restore: bool = True) -> None:
+        restore = restore and not getattr(self, "_hold", 0)
+        self._act(lambda: ws.click(x, y, n, restore=restore))
+
+    def click_box(self, b: dict, after: float = 0.8, restore: bool = True) -> None:
+        restore = restore and not getattr(self, "_hold", 0)
+        self._act(lambda: ws.click(b["x"] + b["w"] / 2, b["y"] + b["h"] / 2, restore=restore))
         time.sleep(after)
 
     def tap(self, *texts: str, timeout: float = 30, exact: bool = False, region=None, pick: int = 0,
@@ -271,15 +338,16 @@ class Screen:
         return b
 
     def keys(self, combo: str) -> None:
-        self._sure_front()
-        ws.keys(combo)
+        self._act(lambda: ws.keys(combo, guard=self._guard()))
 
     def type(self, text: str) -> None:
-        self._sure_front()
-        ws.type_text(text)
+        self._act(lambda: ws.type_text(text, guard=self._guard()))
 
     def esc(self) -> None:
-        ws.keys("esc")
+        if ws.QUIET[0]:                             # (un Esc con la ventana de la persona delante le cerraría algo)
+            self._act(lambda: ws.keys("esc", guard=self._guard()))
+        else:
+            ws.keys("esc")
 
 
 def diag(s: Screen, label: str, boxes=None) -> None:
@@ -1358,12 +1426,15 @@ def _bridge_export_dir(s: Screen, dng_dir: Path, out_dir: Path, expected: int, p
         try:
             # (un Bridge recién abierto a veces no despliega el menú al primer clic: se reintenta AQUÍ, sin volver a
             # abrir Bridge ni repetir todo el paso, que costaba ~1 min)
-            s.tap("Archivo", exact=True, timeout=10, region=(0, 0, 0.12, 0.07), after=0.8)
-            ea = s.tap("Exportar a", exact=True, timeout=8, after=0.9)
-            cp = [b for b in s.ocr() if "personalizada" in norm(b["t"]) and abs(b["y"] - ea["y"]) < 3 * ea["h"]
-                  and b["x"] > ea["x"] + ea["w"]]
-            if cp:
-                s.click_box(cp[0], after=1.5)
+            # (modo tranquilo: el menú entero es UNA acción —el teclado no se devuelve a mitad— y el cursor se queda en
+            # el menú hasta elegir; luego vuelve a donde lo tenía la persona)
+            with s.holding():
+                s.tap("Archivo", exact=True, timeout=10, region=(0, 0, 0.12, 0.07), after=0.8)
+                ea = s.tap("Exportar a", exact=True, timeout=8, after=0.9)
+                cp = [b for b in s.ocr() if "personalizada" in norm(b["t"]) and abs(b["y"] - ea["y"]) < 3 * ea["h"]
+                      and b["x"] > ea["x"] + ea["w"]]
+                if cp:
+                    s.click_box(cp[0], after=1.5)
             s.wait("Opciones de guardado", "Formato de imagen", timeout=10)
             break
         except UIError:
