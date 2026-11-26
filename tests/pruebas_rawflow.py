@@ -2084,7 +2084,7 @@ def p73():
 
 
 @prueba("Selección IA en Windows, tomas al monte (25-nov-2026: 8 pasaron como buenas): toda la foto la misma textura "
-        "de hierba y sin nadie → se aparta; el jardín con árboles, los caballos y las fotos con caras se quedan")
+        "de hierba y sin nadie → se aparta; el jardín con árboles, los caballos y las fotos con caras se quedan", solo_win="motor de selección con OpenCV")
 def p74():
     import numpy as np
     from rawflow import seleccion as sel, seleccion_win as sw
@@ -2128,7 +2128,7 @@ def p75():
 
 
 @prueba("Selección IA en Windows, caras borrosas (26-nov-2026: «dejaste pasar fotos borrosas»): la nitidez de la cara "
-        "se mide igual sea grande o pequeña, clara u oscura; la borrosa se aparta y la nítida (aunque oscura) se queda")
+        "se mide igual sea grande o pequeña, clara u oscura; la borrosa se aparta y la nítida (aunque oscura) se queda", solo_win="motor de selección con OpenCV")
 def p76():
     import cv2
     import numpy as np
@@ -2229,6 +2229,16 @@ def p79():
     assert sorted(Path(f.path).name for f in fs) == ["DSC0001.ARW", "DSC0002.ARW"], fs
     assert {f.size for f in fs} == {10, 20} and all(f.mtime > 0 for f in fs)
     assert vistos and vistos[-1][1] == 2
+    from rawflow import theme as T
+    guardado_rm = T.reduce_motion
+    T.reduce_motion = lambda: False                                            # (en el Mac de GitHub está activo)
+    try:
+        _p79_tarjeta(wd, raiz)
+    finally:
+        T.reduce_motion = guardado_rm
+
+
+def _p79_tarjeta(wd, raiz):
     c = wd.DriveCard(core.Drive(str(raiz), "USB", "exFAT", 100, 50, True))
     assert c._animating()                                                      # ondas al aparecer
     c._born -= 10
@@ -2237,6 +2247,43 @@ def p79():
     c._done_t -= 10
     c._tick()
     assert not c._timer.isActive()                                             # y luego, quieta (sin gastar)
+
+
+@prueba("Memorias (26-nov-2026: «debe detectar SOLO memorias que tengan imágenes RAW»): una USB sin RAW no aparece "
+        "(ni vuelve a aparecer) ni arranca el autoejecutar; una con RAW de cualquier cámara sí")
+def p80():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from rawflow import app as ra
+    base = td.fresh("p80")
+    sin = base / "USB_DOCUMENTOS"
+    td.write(sin / "trabajo.docx", b"d")
+    td.write(sin / "fotos" / "playa.jpg", b"j")                            # JPEG: no es RAW
+    con = base / "SD_CAMARA"
+    td.write(con / "DCIM" / "100CANON" / "IMG_0001.CR3", b"R" * 50)
+    w = ra.MainWindow()
+    w.watcher.stop()
+    try:
+        drives = [core.Drive(str(sin), "USB_DOCUMENTOS", "exFAT", 100, 10, True),
+                  core.Drive(str(con), "SD_CAMARA", "exFAT", 100, 10, True)]
+        w._drives_changed(drives)
+        assert not w.cards                                                  # mientras se revisan, no se ve nada
+        t0 = time.time()
+        while (str(con) not in w.cards or str(sin) not in w.no_raw) and time.time() - t0 < 15:
+            app.processEvents()
+            time.sleep(0.02)
+        assert list(w.cards) == [str(con)], list(w.cards)                   # solo la que trae RAW
+        assert str(sin) in w.no_raw and str(sin) not in w.hidden
+        w._drives_changed(drives)                                           # otra vuelta del vigilante: no reaparece
+        assert list(w.cards) == [str(con)] and str(sin) not in w.hidden
+        w._drives_changed(drives[1:])                                       # quitas la USB: se olvida
+        assert str(sin) not in w.no_raw
+    finally:
+        for s in list(w.scanners.values()):
+            s.stop()
+            s.wait(3000)
+        w.close()
 
 
 def main() -> int:

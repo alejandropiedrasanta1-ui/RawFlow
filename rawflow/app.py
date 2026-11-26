@@ -607,6 +607,8 @@ class MainWindow(QMainWindow):
         self.drop_overlay = None                   # «Suelta para añadir» (se crea con la ventana)
         self.results: Dict[str, List[core.RawFile]] = {}
         self.scanners: Dict[str, ScanWorker] = {}
+        self.hidden: Dict[str, DriveCard] = {}     # memorias revisándose que aún no enseñan RAW (no se ven)
+        self.no_raw: set = set()                   # memorias puestas sin ningún RAW (no se enseñan)
         self.pipe: Pipeline | None = None
         self.last_event: Path | None = None
         self.failed_step = 0
@@ -1242,8 +1244,12 @@ class MainWindow(QMainWindow):
         for key in list(self.cards):
             if key not in now and key not in self.dropped:     # lo arrastrado no es una memoria: se queda
                 self._remove_drive(key)
+        for key in list(self.hidden):                          # aún revisándose (sin RAW vistos) y ya la quitaron
+            if key not in now:
+                self._forget_hidden(key)
+        self.no_raw &= set(now)                                # una que se quitó: si vuelve, se revisa otra vez
         for key, d in now.items():
-            if key not in self.cards:
+            if key not in self.cards and key not in self.hidden and key not in self.no_raw:
                 self._add_drive(d)
         n = len(self.cards)
         self.drive_count.setText(f"{n} detectada{'s' if n != 1 else ''}" if n else "")
@@ -1264,12 +1270,14 @@ class MainWindow(QMainWindow):
         self.detail.setText("")
 
     def _add_drive(self, d: core.Drive):
-        self._clear_result()
         card = DriveCard(d)
         card.toggled.connect(lambda *_: self._update_summary())
-        self.cards[d.key] = card
-        self.cards_lay.insertWidget(self.cards_lay.count() - 1, card)
-        anim.slide_in(card)                        # la tarjeta entra deslizándose y aparece
+        if d.key in self.dropped:                  # carpeta o fotos arrastradas: se enseñan ya (las pusiste tú)
+            self._show_card(d.key, card)
+        else:
+            # 26-nov-2026, el usuario: «debe detectar SOLO memorias que tengan imágenes RAW». La memoria se revisa
+            # escondida y su tarjeta sale (con su animación) al encontrar el primer RAW; sin ninguno, ni aparece.
+            self.hidden[d.key] = card
         w = ScanWorker(d.key, self, paths=self.dropped.get(d.key))
         w.progress.connect(self._scan_progress)
         w.counted.connect(self._scan_counted)
@@ -1277,6 +1285,35 @@ class MainWindow(QMainWindow):
         w.finished.connect(w.deleteLater)
         self.scanners[d.key] = w
         w.start()
+
+    def _show_card(self, key: str, card) -> None:
+        self._clear_result()
+        self.cards[key] = card
+        self.cards_lay.insertWidget(self.cards_lay.count() - 1, card)
+        card._born = card._now()                   # las ondas de «¡encontré una!» empiezan al aparecer
+        anim.slide_in(card)                        # la tarjeta entra deslizándose y aparece
+        n = len(self.cards)
+        self.drive_count.setText(f"{n} detectada{'s' if n != 1 else ''}")
+        self.showing_result = False
+        self._update_summary()
+
+    def _reveal(self, key: str) -> None:
+        """La memoria tiene RAW: su tarjeta aparece."""
+        card = self.hidden.pop(key, None)
+        if card is not None:
+            self._show_card(key, card)
+
+    def _forget_hidden(self, key: str, no_raw: bool = False) -> None:
+        """Memoria sin RAW (o quitada mientras se revisaba): no se enseña ni cuenta para nada."""
+        card = self.hidden.pop(key, None)
+        if card is not None:
+            card.deleteLater()
+        if no_raw:
+            self.no_raw.add(key)
+        else:
+            w = self.scanners.pop(key, None)
+            if w:
+                w.stop()
 
     def _remove_drive(self, key: str):
         self.autorun_keys = tuple(k for k in self.autorun_keys if k != key)
@@ -1300,17 +1337,26 @@ class MainWindow(QMainWindow):
         self.results.pop(key, None)
 
     def _scan_progress(self, key, visited, found):
+        if key in self.hidden and found > 0:
+            self._reveal(key)
         if key in self.cards:
             self.cards[key].set_scanning(visited, found)
 
     def _scan_counted(self, key, files):
         """Ya se sabe cuántas fotos trae: la tarjeta lo enseña (con su animación) sin esperar a lo de los eventos."""
+        if key in self.hidden:
+            if not files:                          # ni un RAW: esta memoria no es de fotos, no aparece
+                self._forget_hidden(key, no_raw=True)
+                return
+            self._reveal(key)
         if key in self.cards and key not in self.results:
             res = core.ScanResult(files)
             self.cards[key].set_done(len(files), res.total_bytes, [f for f, _ in res.by_format().most_common()])
 
     def _scan_done(self, key, files):
         self.scanners.pop(key, None)
+        if key in self.hidden:                     # (si no llegó «counted»)
+            self._scan_counted(key, files)
         if key not in self.cards:
             return
         self.results[key] = files
