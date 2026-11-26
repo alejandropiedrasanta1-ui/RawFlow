@@ -185,6 +185,17 @@ def quit_other_apps(log=lambda s: None, wait: float = 12.0):
     import subprocess
     from concurrent.futures.thread import ThreadPoolExecutor   # directo: en Python 3.15 el otro es perezoso y falla
     if core.SYSTEM == "Windows":
+        try:
+            from . import winscreen
+            quiet = winscreen.QUIET[0]
+        except Exception:  # noqa: BLE001
+            quiet = False
+        if quiet:
+            # 26-nov-2026 (prueba de 5 fotos): con el modo tranquilo la persona TRABAJA en el otro monitor; cerrar sus
+            # programas (se cerró DaVinci Resolve dos veces) o forzar los que preguntan «¿guardar?» le haría perder
+            # trabajo. RawFlow solo cierra las apps que maneja él, paso a paso (quit_apps), como siempre.
+            log("Modo tranquilo: tus programas siguen abiertos (RawFlow no cierra nada tuyo)")
+            return
         if os.environ.get("RAWFLOW_SIN_APPS") != "1":   # pruebas: en Windows nunca se cierra nada de verdad (en el Mac
             quit_other_apps_windows(log, wait)          # las pruebas simulan osascript y sí lo recorren)
         return

@@ -1311,6 +1311,25 @@ def copia_de_seguridad_de_lo_que_se_entrega():
 
 
 @caso
+def modo_tranquilo_no_cierra_tus_programas():
+    """26-nov-2026 (prueba de 5 fotos): con el modo tranquilo, RawFlow cerró DaVinci Resolve (a la fuerza: preguntaba
+    algo). La persona trabaja en el otro monitor: en modo tranquilo no se cierra nada suyo."""
+    if sys.platform != "win32":
+        return
+    from rawflow import pipeline as pl, winscreen as ws
+    llamadas, avisos = [], []
+    guardado = pl.quit_other_apps_windows
+    pl.quit_other_apps_windows = lambda *a, **k: llamadas.append(1) or {}
+    try:
+        ws.set_work(ws.monitors()[0], quiet=True)
+        pl.quit_other_apps(avisos.append)
+        assert not llamadas and any("no cierra nada" in a for a in avisos), (llamadas, avisos)
+    finally:
+        ws.set_work(None, quiet=False)
+        pl.quit_other_apps_windows = guardado
+
+
+@caso
 def modo_tranquilo_monitor_izquierdo():
     """26-nov-2026, el usuario: «todo en el monitor de la izquierda, debajo de la pantalla de proceso, y el otro libre;
     que no me cambies el ratón». Lo que no necesita apps abiertas: se activa y se apaga, el teclado no se devuelve
@@ -1335,9 +1354,15 @@ def modo_tranquilo_monitor_izquierdo():
         ws._FOCUS["user"] = None
         ws.begin_action()
         assert ws._FOCUS["busy"]                         # durante la acción el teclado no se devuelve
-        ws._send(ws._key(0x87), ws._key(0x87, True))      # (F24: nadie la usa) → lo último lo mandó RawFlow
-        time.sleep(0.05)
-        assert not ws.user_active(400), "lo que manda RawFlow no es la persona"
+        ok = False                                       # (si la persona usa el PC mientras se compila, su ratón SÍ
+        for _ in range(10):                              # cuenta: se repite hasta pillar un momento quieto)
+            ws._send(ws._key(0x87), ws._key(0x87, True))  # (F24: nadie la usa) → lo último lo mandó RawFlow
+            time.sleep(0.05)
+            if not ws.user_active(400):
+                ok = True
+                break
+            time.sleep(0.5)
+        assert ok, "lo que manda RawFlow no es la persona"
         ws.end_action()
         assert not ws._FOCUS["busy"] and ws._FOCUS["last"] > 0
     finally:

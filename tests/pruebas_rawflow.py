@@ -2497,6 +2497,26 @@ def p86():
     assert not lw._name_typed(p, [caja("Nombre de archivo:"), caja("Catálogo sin título")])
 
 
+@prueba("Imagen (Windows): un anuncio encima («Un año de Limitless: −30 %… Black Friday», prueba de 5 fotos del "
+        "26-nov-2026) tapaba la barra lateral y Esc no lo cerraba: se pulsa «Quizá el año que viene» (o su ✕), NUNCA el "
+        "botón de comprar", solo_win="Imagen de Windows")
+def p87():
+    from types import SimpleNamespace
+    from rawflow import imagen_win as iw
+    caja = lambda t, x, y, w=80, h=16: {"t": t, "x": x, "y": y, "w": w, "h": h}
+    clics, s = [], SimpleNamespace(rect=(0, 0, 1938, 1098), log=lambda m: None)
+    s.inside = lambda b, r: iw.Screen.inside(s, b, r)
+    s.click_box = lambda b, after=0.8: clics.append(b["t"])
+    anuncio = [caja("Un año de Limitless: -30 %", 815, 470), caja("Oferta de Black Friday. Por tiempo limitado.", 835, 540),
+               caja("Ahorra un 30 %", 930, 590), caja("Quizá el año que viene", 900, 628), caja("Proyectos activos (15)", 129, 370)]
+    assert iw._close_promo(s, anuncio) and clics == ["Quizá el año que viene"], clics
+    clics.clear()
+    assert iw._close_promo(s, anuncio[:3] + [caja("×", 1180, 432, 12, 12)]) and clics == ["×"], clics
+    clics.clear()
+    assert not iw._close_promo(s, [caja("Proyectos activos (15)", 129, 370), caja("Crear proyecto", 206, 548)])
+    assert not clics                                                      # sin anuncio no se toca nada
+
+
 def main() -> int:
     ok = saltadas = 0
     print(f"PRUEBAS DE RAWFLOW ({len(PRUEBAS)} casos)\n", flush=True)

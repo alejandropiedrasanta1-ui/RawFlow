@@ -237,6 +237,31 @@ class Screen:
             scale = 1
         return ws.ocr(w["rect"], scale=scale)
 
+    def ocr_tiles(self, scale: int = 3, cols: int = 3, rows: int = 2) -> List[dict]:
+        """La ventana leída en trozos (con algo de solape) ampliados `scale` veces: para la letra muy pequeña (en un
+        monitor de 1080p al 100 % los rótulos de Imagen miden ~9 px). Mismo formato que ocr()."""
+        self.ocr(scale=1)                           # (pone self.rect y, en modo normal, la ventana delante)
+        w = self.window()
+        if not w:
+            return []
+        x, y, ww, hh = w["rect"]
+        out, seen = [], set()
+        tw, th = ww / cols, hh / rows
+        for r in range(rows):
+            for c in range(cols):
+                rx, ry = int(x + max(0, c * tw - 0.06 * tw)), int(y + max(0, r * th - 0.06 * th))
+                rect = (rx, ry, int(min(x + ww, x + (c + 1) * tw + 0.06 * tw) - rx),
+                        int(min(y + hh, y + (r + 1) * th + 0.06 * th) - ry))
+                try:
+                    for b in ws.ocr(rect, scale=scale):
+                        key = (norm(b["t"]).strip(), round(b["x"] / 8), round(b["y"] / 8))
+                        if key not in seen:
+                            seen.add(key)
+                            out.append(b)
+                except Exception:  # noqa: BLE001
+                    continue
+        return out
+
     def find(self, text: str, exact: bool = False, boxes=None, region=None) -> List[dict]:
         """`region` = (x0, y0, x1, y1) en fracciones de la ventana (0..1): vale para cualquier tamaño de pantalla."""
         t = norm(text)
@@ -260,14 +285,23 @@ class Screen:
             if self.should_stop():
                 raise UIError("Cancelado.")
             # una vuelta sí y otra no, leída AMPLIADA ×2: la letra pequeña («Bodas», 12 px) y la blanca sobre rojo
-            # («Explorar», «Siguiente») a veces no se leían a tamaño real y el paso 4 se paraba (24-nov-2026)
-            boxes = self.ocr(scale=2 if k % 2 else 1)
+            # («Explorar», «Siguiente») a veces no se leían a tamaño real y el paso 4 se paraba (24-nov-2026).
+            # 26-nov-2026 (prueba de 5 fotos en el monitor de 1080p): ahí «Bodas» mide ~9 px y ni ×2 la leía; cada
+            # tercera vuelta se lee POR TROZOS a ×3 (la ventana entera ampliada pierde la letra pequeña; un trozo, no).
+            boxes = self.ocr_tiles(3) if k % 3 == 2 else self.ocr(scale=2 if k % 3 == 1 else 1)
             k += 1
             for txt in texts:
                 f = self.find(txt, exact, boxes, region)
                 if f:
                     self._last = (txt, f)
                     return f[0]
+            if self.exe == EXE and k % 4 == 3:          # un anuncio de Imagen encima lo tapa todo (26-nov-2026)
+                try:
+                    _close_promo(self, boxes)
+                except UIError:
+                    raise
+                except Exception:  # noqa: BLE001
+                    pass
             time.sleep(0.2)
         diag(self, "no-aparece-" + texts[0], boxes if "boxes" in locals() else None)
         raise UIError(f"No apareció «{' / '.join(texts)}» en pantalla.")
@@ -422,6 +456,84 @@ def _sidebar(s: Screen, boxes) -> Optional[dict]:
     return None
 
 
+def _tap_next(s: Screen, timeout: float = 12) -> None:
+    """«Siguiente» del asistente de Nuevo proyecto. 26-nov-2026 (prueba de 5 fotos, monitor de 1080p): el botón,
+    blanco sobre rojo, no se leía y «guiente» pescaba el encabezado «Seguiente paso» de la lista de detrás: el clic
+    caía ahí y el asistente no avanzaba. Ahora: el botón por su texto (nunca «… paso») y, si no se lee, por su sitio,
+    justo a la derecha de «Atrás» (que sí se lee), en la misma fila."""
+    t0, k = time.time(), 0
+    while time.time() - t0 < timeout:
+        if s.should_stop():
+            raise UIError("Cancelado.")
+        boxes = s.ocr_tiles(3) if k % 3 == 2 else s.ocr(scale=2 if k % 3 == 1 else 1)
+        k += 1
+        btn = [b for b in boxes if "guiente" in norm(b["t"]) and "paso" not in norm(b["t"])
+               and s.inside(b, (0.4, 0.5, 1.0, 1.0))]
+        if btn:
+            s.click_box(max(btn, key=lambda b: (b["y"], b["x"])), after=1.2)
+            return
+        back = [b for b in boxes if norm(b["t"]).strip() in ("atras", "back") and s.inside(b, (0.4, 0.5, 1.0, 1.0))]
+        if back and k >= 2:
+            a = max(back, key=lambda b: b["y"])
+            s.log("   («Siguiente» no se lee: lo pulso por su sitio, a la derecha de «Atrás»)")
+            s.click(a["x"] + a["w"] + 5.0 * a["h"], a["y"] + a["h"] / 2)
+            time.sleep(1.2)
+            return
+        time.sleep(0.3)
+    diag(s, "sin-siguiente")
+    raise UIError("No encuentro «Siguiente» en el asistente de Imagen.")
+
+
+def _find_sidebar(s: Screen, boxes=None) -> Optional[dict]:
+    """«Proyectos» en la barra lateral; si a tamaño real no se lee, otra lectura ×2. (26-nov-2026, prueba de 5 fotos en
+    el monitor izquierdo, 1920×1080 al 100 %: la letra pequeña de la barra no salía a tamaño real y el paso 4 se
+    paraba con «Imagen no muestra su pantalla principal».)"""
+    side = _sidebar(s, boxes if boxes is not None else s.ocr())
+    if side:
+        return side
+    # Leer SOLO la franja de la barra, ampliada: medido en vivo (1938×1098 en el monitor de 1080p) la ventana entera
+    # ×2 no leía nada de la barra; la franja ×2 lee «Perfiles de» y «Social», y ×3 ya lee «Proyectos».
+    w = s.window()
+    if w:
+        s.rect = w["rect"]
+        x, y, ww, hh = w["rect"]
+        strip = (x, y + int(0.08 * hh), max(40, int(0.07 * ww)), int(0.6 * hh))
+        for sc in (3, 2):
+            try:
+                side = _sidebar(s, ws.ocr(strip, scale=sc))
+            except Exception:  # noqa: BLE001
+                side = None
+            if side:
+                return side
+    return _sidebar(s, s.ocr(scale=2))
+
+
+PROMO = ("black friday", "por tiempo limitado", "oferta", "limitless", "% de descuento", "ahorra un", "suscribete",
+         "mejora tu plan", "upgrade", "special offer", "limited time")
+PROMO_NO = ("quiza el ano que viene", "quiza mas tarde", "ahora no", "mas tarde", "no, gracias", "no gracias",
+            "maybe later", "not now", "no thanks")
+
+
+def _close_promo(s: Screen, boxes) -> bool:
+    """Imagen saca a veces un anuncio encima de todo («Un año de Limitless: −30 %… Black Friday», 26-nov-2026) que
+    tapa la barra lateral y no se cierra con Esc. Se cierra con su botón de RECHAZAR («Quizá el año que viene», «Ahora
+    no»…) o con su ✕; NUNCA se pulsa el de comprar. True si había uno."""
+    text = norm(" ".join(b["t"] for b in boxes))
+    if not any(k in text for k in PROMO):
+        return False
+    no = [b for b in boxes if any(k in norm(b["t"]) for k in PROMO_NO)]
+    if no:
+        s.log("Imagen: cierro un anuncio que tapaba la pantalla («" + no[0]["t"].strip()[:40] + "»)")
+        s.click_box(no[0], after=1.0)
+        return True
+    xs = [b for b in boxes if b["t"].strip() in ("x", "X", "×", "✕") and s.inside(b, (0.3, 0.08, 1.0, 0.95))]
+    if xs:
+        s.log("Imagen: cierro un anuncio que tapaba la pantalla (✕)")
+        s.click_box(min(xs, key=lambda b: b["y"]), after=1.0)
+        return True
+    return False
+
+
 def _clear(s: Screen, timeout: float = 90) -> None:
     """Deja Imagen en una pantalla normal (con su barra lateral): cierra con Esc / «Cancelar» lo que quedara abierto."""
     t0 = time.time()
@@ -432,7 +544,10 @@ def _clear(s: Screen, timeout: float = 90) -> None:
         w = s.window()
         dialog = bool(w) and w["rect"][2] < 0.7 * (s.main_window() or w)["rect"][2]      # un selector de archivos
         modal = s.find("actualizar ajustes", boxes=boxes) or any(k in norm(b["t"]) for b in boxes for k in WIZARD)
-        if _sidebar(s, boxes) and not modal and not dialog:
+        if not modal and not dialog and _find_sidebar(s, boxes):
+            # (un anuncio a la vista NO impide seguir: el de la columna derecha no tapa nada; si hay uno, se intenta
+            # cerrar y se sigue. Prueba de 5 fotos, 26-nov-2026: exigir «sin anuncio» dejaba el paso esperando)
+            _close_promo(s, boxes)
             return
         if any(k in norm(" ".join(b["t"] for b in boxes)) for k in ("iniciar sesion", "inicia sesion", "log in", "sign in")) \
                 and not _sidebar(s, boxes):
@@ -441,6 +556,8 @@ def _clear(s: Screen, timeout: float = 90) -> None:
             diag(s, "imagen-sin-proyectos", boxes)
             raise UIError("Imagen no muestra su pantalla principal («Proyectos»).")
         s.front(force=True)
+        if _close_promo(s, boxes) or _close_promo(s, s.ocr(scale=2)):
+            continue
         if _close_wizard(s, boxes):
             continue
         s.esc()
@@ -511,7 +628,7 @@ def _open_projects(s: Screen) -> None:
     """Imagen delante, sin ventanas a medias, en la lista de proyectos."""
     _launch(s)
     _clear(s)
-    side = _sidebar(s, s.ocr())
+    side = _find_sidebar(s)
     if not side:
         raise UIError("No encuentro «Proyectos» en la barra lateral de Imagen.")
     # 25-nov-2026: con otra ventana con el foco (el Administrador de tareas), el clic en «Proyectos» no entraba y
@@ -529,7 +646,8 @@ def _open_projects(s: Screen) -> None:
                 _close_uploads(s)
                 return
             time.sleep(0.4)
-        side = _sidebar(s, s.ocr()) or side
+        _close_promo(s, s.ocr())                     # (un anuncio que salió justo ahora taparía la lista)
+        side = _find_sidebar(s) or side
     s.wait("Archivados", "Nuevo proyecto", timeout=10)
     _close_uploads(s)
 
@@ -792,9 +910,9 @@ def _create_project(s: Screen, dng_dir: Path, project: str, photo_type: str, pfi
     try:
         s.tap(photo_type, exact=True, timeout=10)
         _name_still_there(s, name_box, project)               # Imagen pudo pisarlo después de comprobarlo
-        s.tap("guiente", timeout=10, pick=-1, after=1.2)      # «Siguiente»
+        _tap_next(s)                                          # «Siguiente»
         s.wait("Perfil IA", "Selección con IA", timeout=30)
-        s.tap("guiente", timeout=10, pick=-1, after=1.2)
+        _tap_next(s)
         s.wait("Herramientas seleccionadas", "Herramientas IA", timeout=30)
         s.tap("crear proyecto", timeout=10, pick=-1, after=2.5)
     except UIError:
@@ -1232,6 +1350,30 @@ def _bridge_export_button(s: Screen, tries: int = 4) -> Optional[dict]:
         if can:
             c = min(can, key=lambda b: b["y"])
             return {"t": "Exportar", "x": c["x"], "y": c["y"] - 3.8 * c["h"], "w": c["w"], "h": c["h"]}
+        # 26-nov-2026 (prueba de 5 fotos, monitor de 1080p): ni «Exportar» ni «Cancelar» se leían (letra blanca y
+        # pequeña). Se lee SOLO la columna de los botones, ampliada ×3.
+        w = s.window() if hasattr(s, "window") else None
+        if w and k == 1:
+            x, y, ww, hh = w["rect"]
+            col = (int(x + 0.7 * ww), int(y + 0.03 * hh), int(0.3 * ww), int(0.32 * hh))
+            try:
+                big = ws.ocr(col, scale=3)
+            except Exception:  # noqa: BLE001
+                big = []
+            hit = [b for b in big if like(b["t"], "exportar") >= 0.7]
+            if hit:
+                return min(hit, key=lambda b: b["y"])
+            can = [b for b in big if like(b["t"], "cancelar") >= 0.7]
+            if can:
+                c = min(can, key=lambda b: b["y"])
+                return {"t": "Exportar", "x": c["x"], "y": c["y"] - 3.8 * c["h"], "w": c["w"], "h": c["h"]}
+    # último recurso: el diálogo «Exportar» de Bridge es siempre igual (730×591 a 100 %): el botón está arriba a la
+    # derecha, en el 90 % del ancho y el 12,5 % del alto. Solo si la ventana delante ES ese diálogo.
+    w = s.window() if hasattr(s, "window") else None
+    if w and norm(w.get("title", "")).strip() == "exportar" and w["rect"][2] < 1400:
+        x, y, ww, hh = w["rect"]
+        s.log("   (Bridge: el botón «Exportar» no se lee: lo pulso por su sitio, arriba a la derecha del diálogo)")
+        return {"t": "Exportar", "x": x + 0.899 * ww - 20, "y": y + 0.125 * hh - 8, "w": 40, "h": 16}
     return None
 
 
@@ -1406,7 +1548,18 @@ def _bridge_export_dir(s: Screen, dng_dir: Path, out_dir: Path, expected: int, p
     for k in range(3):
         s.click(t["x"] + t["w"] / 2, t["y"] - 3.5 * t["h"])    # la miniatura (encima de su nombre)
         time.sleep(0.6)
-        s.keys("ctrl+a")                                        # todas
+        if k == 0:
+            s.keys("ctrl+a")                                    # todas
+        else:
+            # 26-nov-2026 (prueba de 5 fotos): Ctrl+A no seleccionaba nada más («7 elementos, 1 seleccionado») tres
+            # veces seguidas. El menú Edición → Seleccionar todo no depende de qué panel de Bridge tenga el foco.
+            try:
+                with s.holding():
+                    s.tap("Editar", exact=True, timeout=6, region=(0, 0, 0.3, 0.08), after=0.8)
+                    s.tap("Seleccionar todo", timeout=6, after=0.6)
+            except UIError:
+                s.esc()
+                s.keys("ctrl+a")
         time.sleep(1.0)
         # 26-nov-2026 (revisión): se exportaba sin mirar si Ctrl+A había entrado (a veces solo quedaba elegida la
         # miniatura pulsada y Bridge exportaba UNA foto). La barra de estado dice «N elementos, M seleccionados»;
@@ -1464,10 +1617,24 @@ def _bridge_export_dir(s: Screen, dng_dir: Path, out_dir: Path, expected: int, p
         time.sleep(0.7)
     _bridge_unfold_format(s)
     fmt = s.wait("Formato", exact=True, timeout=10)
-    boxes = s.ocr()
-    if not [b for b in boxes if norm(b["t"]).strip() == "jpeg" and 0 < b["y"] - fmt["y"] < 4 * fmt["h"]]:
-        s.click(fmt["x"] + 8 * fmt["h"], fmt["y"] + 3 * fmt["h"])
-        s.tap("JPEG", exact=True, timeout=5, after=1)
+    jpeg_below = lambda bs: [b for b in bs if norm(b["t"]).strip() == "jpeg" and 0 < b["y"] - fmt["y"] < 4 * fmt["h"]]  # noqa: E731
+    # 26-nov-2026 (prueba de 5 fotos, monitor de 1080p): «JPEG» no se leía a tamaño real dentro del desplegable; se
+    # abría para elegirlo, la lista (letra pequeña) tampoco se leía y se quedaba ABIERTA tapando la calidad. Ahora
+    # se mira también por trozos ×3 antes de tocar nada, y si hay que abrirla se elige «JPEG» DE LA LISTA y se
+    # comprueba que se cerró.
+    if not (jpeg_below(s.ocr()) or jpeg_below(s.ocr_tiles(3))):
+        s.click(fmt["x"] + 8 * fmt["h"], fmt["y"] + 3 * fmt["h"])          # abre el desplegable
+        time.sleep(0.8)
+        for _ in range(3):
+            bs = s.ocr_tiles(3)
+            items = [b for b in bs if norm(b["t"]).strip() == "jpeg" and b["y"] - fmt["y"] > 3.5 * fmt["h"]]
+            if items:
+                s.click_box(min(items, key=lambda b: b["y"]), after=0.8)   # «JPEG» de la lista
+            if not [b for b in s.ocr_tiles(3) if norm(b["t"]).strip() in ("tiff", "png")]:
+                break                                                       # la lista ya se cerró
+        else:                                   # sigue abierta: otro clic en el desplegable la cierra (sin cambiarlo)
+            s.click(fmt["x"] + 8 * fmt["h"], fmt["y"] + 3 * fmt["h"])
+            time.sleep(0.8)
     s.wait("Calidad de imagen", timeout=10)
     num, top = _bridge_quality(s)
     if not (num and num["t"].strip() == "12" and top):

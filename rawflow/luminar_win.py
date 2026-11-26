@@ -186,30 +186,42 @@ def _menu(s, *path: str, then: str = "") -> None:
         _menu_walk(s, path, then)
     finally:
         ws.end_action()
-        ws.restore_cursor()
+        if not getattr(s, "_hold", 0):        # (dentro de s.holding(): el cursor sigue en el menú hasta el final)
+            ws.restore_cursor()
 
 
 def _menu_walk(s, path, then: str) -> None:
     from . import imagen_win as iw
-    for _ in range(8):                               # (con un catálogo grande, Luminar tarda en responder al abrir)
+
+    def read(k: int):
+        """Una vuelta a tamaño real y otra POR TROZOS ×3: en el monitor de 1080p (modo tranquilo) el menú de Luminar
+        se veía abierto pero su letra pequeña no se leía a tamaño real (prueba de 5 fotos, 26-nov-2026)."""
+        return s.ocr() if k % 2 == 0 else s.ocr_tiles(3)
+
+    for k in range(8):                               # (con un catálogo grande, Luminar tarda en responder al abrir)
         s.front(force=True)                          # Luminar delante (otra ventana o Alt+Tab se llevan el clic)
-        if s.find("Archivo", exact=True, region=(0, 0.04, 0.08, 0.12)):
+        if s.find("Archivo", exact=True, boxes=read(k), region=(0, 0.04, 0.08, 0.12)) or                 s.find("Archivo", exact=True, boxes=read(k + 1), region=(0, 0.04, 0.08, 0.12)):
             break
         s.click(s.rect[0] + 0.033 * s.rect[2], s.rect[1] + 0.033 * s.rect[3], restore=False)   # el logo
-        t0 = time.time()
-        while time.time() - t0 < 4 and not s.find("Archivo", exact=True, region=(0, 0.04, 0.08, 0.12)):
-            time.sleep(0.4)
+        t0, j = time.time(), 0
+        while time.time() - t0 < 5 and not s.find("Archivo", exact=True, boxes=read(j),
+                                                     region=(0, 0.04, 0.08, 0.12)):
+            j += 1
+            time.sleep(0.3)
     for i, item in enumerate(path):
         nxt = path[i + 1] if i + 1 < len(path) else then
         for _try in range(4):
-            boxes = s.ocr()
+            boxes = read(_try)
             hits = [b for b in s.find(item, exact=True, boxes=boxes) if b["y"] > s.rect[1] + 0.05 * s.rect[3]]
+            if not hits and _try % 2 == 0:
+                boxes = read(1)
+                hits = [b for b in s.find(item, exact=True, boxes=boxes) if b["y"] > s.rect[1] + 0.05 * s.rect[3]]
             if not hits:
                 break
             b = min(hits, key=lambda q: q["x"]) if not i else max(hits, key=lambda q: q["x"])
             s.click_box(b, after=0.9, restore=False)
             if not nxt or any(q["x"] > b["x"] + b["w"] and q["y"] > s.rect[1] + 0.05 * s.rect[3]
-                              for q in s.find(nxt, boxes=s.ocr())):
+                              for bs in (s.ocr(), s.ocr_tiles(3)) for q in s.find(nxt, boxes=bs)):
                 break                                # se abrió su submenú (lo siguiente está a su derecha, no
             #                                          el «Catálogo» de la barra de arriba)
         else:
@@ -222,8 +234,16 @@ def _menu_walk(s, path, then: str) -> None:
 def _name_typed(path: Path, boxes) -> bool:
     """¿Se lee en pantalla el principio del nombre del archivo? Sin tildes ni mayúsculas en los dos lados."""
     from . import imagen_win as iw
-    want = iw.norm(path.stem[:12]).strip()
-    return bool(want) and any(want in iw.norm(b["t"]) for b in boxes)
+
+    def canon(t: str) -> str:
+        # (26-nov-2026, prueba de 5 fotos: se escribió bien pero el OCR leyó «RawFIow» —I por l— y se daba por mal
+        # escrito; las letras que el OCR confunde valen igual)
+        t = iw.norm(t)
+        for a, b in (("l", "i"), ("1", "i"), ("|", "i"), ("0", "o")):
+            t = t.replace(a, b)
+        return t.strip()
+    want = canon(path.stem[:12])
+    return bool(want) and any(want in canon(b["t"]) for b in boxes)
 
 
 def _save_as(s, path: Path) -> None:
@@ -264,8 +284,11 @@ def _new_catalog(s, path: Path, log: Log) -> None:
     from . import imagen_win as iw
     path.parent.mkdir(parents=True, exist_ok=True)
     log(f"Luminar: catálogo nuevo «{path.stem}»…")
-    _menu(s, "Archivo", "Catálogo", then="Nuevo")
-    s.tap("Nuevo...", "Nuevo…", timeout=10)
+    # (26-nov-2026, prueba de 5 fotos: el submenú se abre al pasar el ratón; si el cursor volvía a su sitio al acabar
+    # _menu, se cerraba antes de pulsar «Nuevo…». Todo el recorrido, con el último clic, va junto)
+    with s.holding():
+        _menu(s, "Archivo", "Catálogo", then="Nuevo")
+        s.tap("Nuevo...", "Nuevo…", timeout=10)
     _save_as(s, path)
     t0 = time.time()
     while time.time() - t0 < 60:                     # el catálogo NUEVO está vacío: «Aún no hay fotos»
