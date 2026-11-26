@@ -496,9 +496,9 @@ def cerrar_apps_windows():
         return
     from rawflow import pipeline as pl, winscreen as ws
     import psutil
-    vivos = {10: "Resolve.exe", 11: "chrome.exe", 12: "chrome.exe", 13: "Editor.exe", 14: "explorer.exe",
-             15: "Protegida.exe", 16: "FanControl.exe", 17: "claude.exe"}
-    con_ventana = {10, 11, 13, 14, 15, 16, 17}
+    vivos = {10: "Resolve.exe", 11: "spotify.exe", 12: "spotify.exe", 13: "Editor.exe", 14: "explorer.exe",
+             15: "Protegida.exe", 16: "FanControl.exe", 17: "claude.exe", 18: "chrome.exe", 19: "msedge.exe"}
+    con_ventana = {10, 11, 13, 14, 15, 16, 17, 18, 19}
     hijos = {11: [12]}
     quiere_cerrar = {10: "sale", 11: "se esconde", 13: "pregunta"}
     terminados, cerradas_x = [], []
@@ -544,11 +544,12 @@ def cerrar_apps_windows():
         r = pl.quit_other_apps_windows(lambda m: None, wait=1, keep_extra=["Protegida.exe"])
     finally:
         ws.windows, ws.close_window, psutil.Process, psutil.wait_procs, pl.background_sweep, pl._own_tree = orig
-    assert sorted(cerradas_x) == ["Editor.exe", "Resolve.exe", "chrome.exe"], cerradas_x   # ni explorer, ni protegida,
-    assert r == {"cerradas": ["Resolve.exe", "chrome.exe"], "forzadas": ["Editor.exe"], "fondo": ["fondo"]}, r
+    assert sorted(cerradas_x) == ["Editor.exe", "Resolve.exe", "spotify.exe"], cerradas_x   # ni explorer, ni protegida,
+    assert r == {"cerradas": ["Resolve.exe", "spotify.exe"], "forzadas": ["Editor.exe"], "fondo": ["fondo"]}, r
     assert barrido, "después, todo lo de segundo plano"                                     # ni FanControl
-    assert sorted(terminados) == ["Editor.exe", "chrome.exe", "chrome.exe"], terminados    # forzada; Chrome + hijo
+    assert sorted(terminados) == ["Editor.exe", "spotify.exe", "spotify.exe"], terminados    # forzada; Chrome + hijo
     assert 14 in vivos and 15 in vivos and 16 in vivos and 17 in vivos                      # Windows/protegida/ventiladores/Claude
+    assert 18 in vivos and 19 in vivos            # 25-nov-2026: el navegador se queda (el usuario lo usa mientras tanto)
 
 
 @caso
@@ -581,7 +582,9 @@ def banco_descarte():
     # 25-nov-2026: + ojos cerrados del todo a solas, + cara movida/desenfocada, + quemada sin caras (pedido del usuario).
     # Revisadas a ojo con recortes de cada cara (boda 14 nov: las 10 «movidas» y las 10 de ojos que la otra IA daba
     # por buenas lo están de verdad; XV 15/8 nov: 6 de 8 ojos cerrados, 2 mirando abajo con los ojos casi cerrados).
-    ref = {"20nov_480": 58, "boda14nov_1604": 129, "jutiapa_597": 114, "xv15nov_376_win": 54, "xv8nov_516_win": 105}
+    # 26-nov-2026 (pedido del usuario): de 3+ casi iguales se quedan 2 (respaldo) y ningún momento se queda sin foto:
+    # antes 58 / 129 / 114 / 54 / 105.
+    ref = {"20nov_480": 47, "boda14nov_1604": 126, "jutiapa_597": 94, "xv15nov_376_win": 47, "xv8nov_516_win": 92}
     vistas = {}
     for f in sorted(banco.DATOS.glob("*.jsonl")):
         e = banco.evaluar(banco.cargar(f))
@@ -1208,7 +1211,9 @@ def seleccion_ia_en_windows():
     assert st["lum"] == 0 and st["negro"] == 100 and st["nit"] == 0, st
     # dos tomas iguales a 1 s y otra distinta 2 min después → una repetida apartada; la distinta y la negra aparte
     _raw_falso(d / "DSC_0002.NEF", img, fecha="2026:11:15 18:30:06")
-    otra = cv2.GaussianBlur(np.random.default_rng(7).integers(0, 255, (200, 300, 3), dtype=np.uint8), (0, 0), 9)
+    # (una gris lisa no vale de «distinta»: desde el 26-nov-2026 eso es una toma a la pared)
+    otra = np.ascontiguousarray(img[::-1, ::-1, ::-1])
+    cv2.rectangle(otra, (20, 20), (120, 90), (0, 0, 0), -1)
     _raw_falso(d / "DSC_0003.NEF", otra, fecha="2026:11:15 18:32:10")
     _raw_falso(d / "DSC_0004.NEF", np.zeros((200, 300, 3), np.uint8), fecha="2026:11:15 18:40:00")
     rows = W.analyze([str(d / f"DSC_000{k}.NEF") for k in (1, 2, 3, 4)])

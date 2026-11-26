@@ -8,8 +8,8 @@ con modelos pequeños que van dentro de RawFlow (rawflow/modelos, sin internet):
   · parecido entre tomas: huella de MobileNetV3 (MediaPipe Image Embedder, Apache 2.0);
   · luz, negro, quemado y nitidez: las mismas cuentas que rfui (regionStats).
 Lo que Vision da y aquí no hay (nota estética y etiquetas de escena) simplemente no se rellena: las reglas que lo usan
-(toma «fallida», toma «al piso») no se aplican en Windows; las repetidas, los ojos cerrados y las tomas negras o
-blancas, sí.
+(toma «fallida») no se aplican en Windows; las repetidas, los ojos cerrados y las tomas negras o blancas, sí. La toma
+«al piso / al monte» se mide aquí por la textura de toda la foto (ground_stats).
 
 Las medidas se devuelven EN LA ESCALA DE VISION (parecido, ojos), con las equivalencias medidas en eventos reales
 (ver _to_vision y EYE_*): así rawflow/seleccion.py decide con las mismas reglas y los mismos umbrales en Mac y Windows.
@@ -227,6 +227,40 @@ def region_stats(gray) -> Dict[str, float]:
             "desv": float(c.std()), "nit": float(lap.var())}
 
 
+def face_sharpness(crop) -> float:
+    """Nitidez de una cara que no depende de su tamaño ni de su contraste: la cara llevada a 64×64 en gris, varianza
+    del laplaciano entre la varianza de la imagen. (La «nit» de siempre sube con caras grandes o contrastadas: en
+    «25 nov 2026» una niña nítida daba 0,030 de la mediana y un novio borroso 0,090.) Ver BLUR_NORM en seleccion.py."""
+    import cv2
+    import numpy as np
+    if crop is None or crop.shape[0] < 12 or crop.shape[1] < 12:
+        return -1.0
+    g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+    g = cv2.resize(g, (64, 64), interpolation=cv2.INTER_AREA).astype(np.float32)
+    return round(float(cv2.Laplacian(g, cv2.CV_32F).var() / (g.var() + 1.0)), 4)
+
+
+def ground_stats(img) -> Dict[str, float]:
+    """Para la toma «al piso / al monte» (en Windows no hay etiquetas de escena): «igual» = parte de la rejilla 4×4
+    cuyo color medio (Lab) está a < 12 del de la mediana (1 = toda la foto la misma superficie); «verde» = parte de
+    píxeles de hierba (tono verde con color). Ver GROUND_* en seleccion.py."""
+    import cv2
+    import numpy as np
+    h, w = img.shape[:2]
+    if img.ndim != 3 or h < 8 or w < 8:
+        return {}
+    s = 192 / max(h, w)
+    sm = cv2.resize(img, (max(4, int(w * s)), max(4, int(h * s))), interpolation=cv2.INTER_AREA)
+    lab = cv2.cvtColor(sm, cv2.COLOR_BGR2LAB).astype(np.float32)
+    hsv = cv2.cvtColor(sm, cv2.COLOR_BGR2HSV)
+    H, W = lab.shape[:2]
+    blocks = np.array([lab[i * H // 4:(i + 1) * H // 4, j * W // 4:(j + 1) * W // 4].reshape(-1, 3).mean(0)
+                       for i in range(4) for j in range(4)])
+    dist = np.linalg.norm(blocks - np.median(blocks, 0), axis=1)
+    green = (hsv[..., 0] >= 28) & (hsv[..., 0] <= 90) & (hsv[..., 1] > 50)
+    return {"igual": round(float((dist < 12).mean()), 3), "verde": round(float(green.mean()), 3)}
+
+
 def _eye_ratio(pts) -> float:
     """Alto/ancho del ojo medido A LO LARGO DEL OJO (de comisura a comisura), como eyeRatio en rfui."""
     import numpy as np
@@ -331,6 +365,7 @@ class Engine:
         if x1 - x0 >= 12 and y1 - y0 >= 12:
             st = region_stats(_gray_resized(big[y0:y1, x0:x1], min(256, x1 - x0)))
             d["lum"], d["nit"] = st["lum"], st["nit"]
+            d["nitn"] = face_sharpness(big[y0:y1, x0:x1])
         else:
             d["lum"], d["nit"] = -1.0, -1.0
         # recorte cuadrado con margen, enderezado por la línea de los ojos, a 256 px (lo que espera la malla)
@@ -404,6 +439,7 @@ class Engine:
         g = region_stats(_gray_resized(img, 768))
         for key in ("lum", "negro", "quemado", "desv", "nit"):
             o[key] = g.get(key, -1.0)
+        o.update(ground_stats(img))
         sx, sy = W / img.shape[1], H / img.shape[0]
         caras = []
         # (Probado el 24-nov-2026: buscar también con la foto girada 90° cuando no sale ninguna cara encuentra a alguien

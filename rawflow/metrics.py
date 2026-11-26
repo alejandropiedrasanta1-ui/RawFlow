@@ -23,6 +23,38 @@ PROGRAMS = (
 )
 
 
+_NO_NVIDIA = [False]          # sin nvidia-smi en este equipo: no volver a intentarlo cada 4 s
+
+
+def gpu_info() -> Dict[str, object]:
+    """Tarjeta gráfica: {"gpu": uso 0-100, "vram_used": GB, "vram_total": GB, "gpu_temp": °C}. En el Mac solo el uso
+    (la memoria es la del sistema); en Windows, de nvidia-smi (la tarjeta más ocupada si hay varias). {} si no se
+    puede leer."""
+    if core.SYSTEM == "Darwin":
+        g = gpu_percent()
+        return {} if g is None else {"gpu": g}
+    if core.SYSTEM != "Windows" or _NO_NVIDIA[0]:
+        return {}
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+                            "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=5,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except OSError:
+        _NO_NVIDIA[0] = True
+        return {}
+    except subprocess.SubprocessError:
+        return {}
+    best: Dict[str, object] = {}
+    for line in r.stdout.splitlines() if r.returncode == 0 else ():
+        try:
+            use, used, total, temp = [float(x) for x in line.split(",")[:4]]
+        except ValueError:                             # «[N/A]» en algún dato: esa tarjeta no se cuenta
+            continue
+        if not best or use > best["gpu"]:
+            best = {"gpu": int(use), "vram_used": used / 1024, "vram_total": total / 1024, "gpu_temp": int(temp)}
+    return best
+
+
 def gpu_percent() -> Optional[int]:
     """Uso de la tarjeta gráfica (0-100) que publica macOS; None si no se puede leer."""
     if core.SYSTEM != "Darwin":
@@ -77,7 +109,7 @@ class Sampler(threading.Thread):
         psutil.cpu_percent(None)
         net0 = psutil.net_io_counters()
         t_net = time.monotonic()
-        gpu, t_gpu, power, t_pow = None, 0.0, (True, None, None), 0.0
+        gpu, t_gpu, power, t_pow = {}, 0.0, (True, None, None), 0.0
         while not self._stop.wait(self.every):
             try:
                 now = time.monotonic()
@@ -89,7 +121,7 @@ class Sampler(threading.Thread):
                 down = (net.bytes_recv - net0.bytes_recv) / dt / 1e6
                 net0, t_net = net, now
                 if now - t_gpu >= 4:
-                    gpu, t_gpu = gpu_percent(), now
+                    gpu, t_gpu = gpu_info(), now
                 if now - t_pow >= 20:
                     power, t_pow = core.power_state(), now
                 per: Dict[str, float] = {}
@@ -115,7 +147,9 @@ class Sampler(threading.Thread):
                     self._procs.pop(pid, None)
                     self._label.pop(pid, None)
                 procs = sorted(((k, v) for k, v in per.items() if v >= 1.0), key=lambda kv: -kv[1])
-                live.set_metrics({"cpu": cpu, "gpu": gpu, "mem_used": vm.used / 1e9, "mem_total": vm.total / 1e9,
+                live.set_metrics({"cpu": cpu, "gpu": gpu.get("gpu"), "vram_used": gpu.get("vram_used"),
+                                  "vram_total": gpu.get("vram_total"), "gpu_temp": gpu.get("gpu_temp"),
+                                  "mem_used": vm.used / 1e9, "mem_total": vm.total / 1e9, "mem_pct": vm.percent,
                                   "up": max(0.0, up), "down": max(0.0, down), "procs": procs, "power": power,
                                   "ncpu": psutil.cpu_count() or 1})
             except Exception:  # noqa: BLE001

@@ -21,8 +21,8 @@ jobs:
     name: Windows (instalador .exe)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.14'
       - name: Inno Setup
@@ -40,7 +40,7 @@ jobs:
           $ver = [regex]::Match((Get-Content rawflow/__init__.py -Raw), '__version__\s*=\s*"([^"]+)"').Groups[1].Value
           New-Item -ItemType Directory salida -Force | Out-Null
           Copy-Item "dist/windows/RawFlow $ver para Windows (Instalador).exe" "salida/RawFlow-$ver-Windows-Instalador.exe"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: salida/*.exe
@@ -50,8 +50,8 @@ jobs:
     name: Mac (instalador de un clic)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.14'
       - name: Carpetas de los programas (vacías, solo para las pruebas)
@@ -70,7 +70,7 @@ jobs:
           VER=$(python3 -c "import re; print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', open('rawflow/__init__.py').read()).group(1))")
           mkdir -p salida
           cp "dist/Instalar RawFlow (Mac).zip" "salida/RawFlow-$VER-Mac.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mac
           path: salida/*.zip
@@ -82,8 +82,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: salida
           merge-multiple: true

@@ -334,29 +334,45 @@ def scan_drive(root: str,
                should_stop: Callable[[], bool] = lambda: False, skip_events: bool = False) -> List[RawFile]:
     """Recorre una unidad (o una carpeta arrastrada) y devuelve sus archivos RAW. `skip_events`: no entra en las
     carpetas de eventos ya hechos (así arrastrar el Escritorio nunca se lleva las fotos de otros eventos)."""
+    # (26-nov-2026) con os.scandir: en Windows el tamaño y la fecha vienen YA en el listado de la carpeta (sin abrir
+    # cada foto). Antes, os.walk + os.stat por cada RAW: en una USB, una consulta por foto (≈1-3 ms cada una).
     found: List[RawFile] = []
     visited = 0
-    for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: None):
+    stack = [root]
+    while stack:
         if should_stop():
             break
-        dirnames[:] = [d for d in dirnames
-                       if d.lower() not in SKIP_DIRS and not d.startswith(".")
-                       and not (skip_events and is_event_dir(d))]
-        for name in filenames:
-            visited += 1
-            if name.startswith("._"):  # basura de macOS en tarjetas FAT
-                continue
-            if os.path.splitext(name)[1].lower() in RAW_EXTENSIONS:
-                full = os.path.join(dirpath, name)
+        d = stack.pop()
+        try:
+            it = os.scandir(d)
+        except OSError:
+            continue
+        subdirs = []
+        with it:
+            for e in it:
+                name = e.name
                 try:
-                    st = os.stat(full)
+                    if e.is_dir(follow_symlinks=False):
+                        if (name.lower() not in SKIP_DIRS and not name.startswith(".")
+                                and not (skip_events and is_event_dir(name))):
+                            subdirs.append(e.path)
+                        continue
                 except OSError:
                     continue
-                if st.st_size == 0:
+                visited += 1
+                if name.startswith("._"):  # basura de macOS en tarjetas FAT
                     continue
-                found.append(RawFile(full, st.st_size, st.st_mtime, root))
-        if on_progress and visited % 200 < len(filenames) + 1:
-            on_progress(visited, len(found))
+                if os.path.splitext(name)[1].lower() in RAW_EXTENSIONS:
+                    try:
+                        st = e.stat()
+                    except OSError:
+                        continue
+                    if st.st_size == 0:
+                        continue
+                    found.append(RawFile(e.path, st.st_size, st.st_mtime, root))
+                if on_progress and visited % 200 == 0:
+                    on_progress(visited, len(found))
+        stack.extend(reversed(sorted(subdirs)))     # mismo orden que antes (carpetas en orden de nombre)
     if on_progress:
         on_progress(visited, len(found))
     return found
@@ -925,6 +941,8 @@ def drive_present(disk: str) -> bool:
     dispositivo expulsado sigue en la lista (en espera, problema 47) hasta que lo desenchufas."""
     if disk.startswith("win:"):
         return win_devnode(disk[4:])[0]
+    if disk == "wait:":                           # Windows sin saber qué dispositivo era: sigue hasta cerrarlo a mano
+        return True
     return bool(disk) and os.path.exists(f"/dev/{disk}")
 
 

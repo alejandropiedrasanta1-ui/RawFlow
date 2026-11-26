@@ -39,6 +39,8 @@ DL_TRIES = 3          # descargas de ediciones de un mismo proyecto antes de dar
 DL_WAIT = 15          # segundos entre una y otra (×1, ×2…)
 PROMPT_WAIT = 15      # tras «SUCCESS», segundos esperando la pregunta «¿Dónde quieres revisar?»
 SETTLE_WAIT = 60      # tras «SUCCESS», segundos para que los DNG terminen de llevar las ediciones
+RETAP_AFTER = 20      # segundos con el botón «Descargar ediciones» aún en pantalla antes de pulsarlo otra vez
+RETAP_MAX = 3         # …como mucho estas veces
 
 
 def _prog(f: float) -> None:
@@ -86,20 +88,56 @@ class Screen:
         return wins[0] if wins else None
 
     def main_window(self) -> Optional[dict]:
-        wins = [w for w in ws.windows(exe=self.exe) if w["rect"][2] > 300 and w["rect"][3] > 200]
+        allw = ws.windows(exe=self.exe)
+        wins = [w for w in allw if w["rect"][2] > 300 and w["rect"][3] > 200]
+        if not wins:
+            # 25-nov-2026: Imagen MINIMIZADA mide 199×34 y no contaba como ventana: RawFlow dejaba de verla y esperaba
+            # 20 min una descarga que no había empezado. Minimizada también vale (front() la devuelve a su sitio).
+            wins = [w for w in allw if w["min"] and w["title"].strip()]
         return max(wins, key=lambda w: w["rect"][2] * w["rect"][3]) if wins else None
+
+    _SYSTEM = ("explorer.exe", "rawflow.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe",
+               "searchhost.exe", "searchapp.exe", "textinputhost.exe", "applicationframehost.exe", "dwm.exe")
+
+    def _uncover(self) -> None:
+        """Minimiza las ventanas de OTROS programas que tapan la del programa. 25-nov-2026: una ventana «siempre
+        visible» (Claude) quedaba encima de Imagen aunque Imagen estuviera delante; RawFlow leía en pantalla el texto
+        de esa ventana, sus clics caían en ella y el paso 4 se paró varias veces. Solo se minimiza (nada se cierra)."""
+        try:
+            w = self.window()
+            if not w:
+                return
+            x, y, ww, hh = w["rect"]
+            for o in ws.windows():                               # de delante hacia atrás
+                if o["hwnd"] == w["hwnd"]:
+                    break
+                exe = (o.get("exe") or "").lower()
+                if o["min"] or not exe or exe == self.exe.lower() or exe in self._SYSTEM:
+                    continue
+                if o.get("pid") == os.getpid():                  # RawFlow misma (también desde el código, con
+                    continue                                     # python.exe): su pantalla y su botón «Parar» no
+                ox, oy, ow, oh = o["rect"]
+                ix, iy = min(x + ww, ox + ow) - max(x, ox), min(y + hh, oy + oh) - max(y, oy)
+                if ix > 0 and iy > 0 and ix * iy > 0.03 * ww * hh:
+                    self.log(f"   («{o['title'][:40] or exe}» tapaba la ventana: la minimizo)")
+                    ws.user32.ShowWindow(o["hwnd"], 6)           # SW_MINIMIZE
+                    time.sleep(0.3)
+        except Exception:  # noqa: BLE001
+            pass
 
     def front(self, force: bool = False) -> None:
         """Si otra ventana se puso delante, vuelve a traer la del programa (RawFlow solo ve y toca lo de delante)."""
         if not force and time.time() - self._fcheck < 1.5:
             return
         self._fcheck = time.time()
+        self._uncover()
         fg = ws.foreground()
         if fg.get("exe", "").lower() == self.exe.lower():
             return
         w = self.window() or self.main_window()
         if w:
-            ws.activate(w["hwnd"], maximize=w["rect"][2] > 900, primary=w["rect"][2] > 900)
+            big = w["rect"][2] > 900 or w["min"]          # minimizada: es la principal, vuelve maximizada
+            ws.activate(w["hwnd"], maximize=big, primary=big)
             time.sleep(0.5)
 
     def activate(self) -> None:
@@ -244,6 +282,11 @@ def _sidebar(s: Screen, boxes) -> Optional[dict]:
     reg = (0, 0.1, 0.08, 0.75)
     perf = [b for b in boxes if norm(b["t"]).strip().startswith("perfiles de") and s.inside(b, reg)]
     soc = [b for b in boxes if norm(b["t"]).strip().startswith("social") and s.inside(b, reg)]
+    if not soc:
+        # 25-nov-2026 (evento de 585 fotos parado en el paso 4, 4 intentos): el OCR tampoco leyó «Social», solo su
+        # segunda línea, «Spotlight». Vale igual: está una línea más abajo.
+        soc = [dict(b, y=b["y"] - b["h"]) for b in boxes
+               if norm(b["t"]).strip().startswith("spotlight") and s.inside(b, reg)]
     if perf and soc and soc[0]["y"] - perf[0]["y"] > 3 * perf[0]["h"]:
         a, c = perf[0], soc[0]
         y = (a["y"] + c["y"]) / 2 + 0.4 * a["h"]
@@ -343,8 +386,23 @@ def _open_projects(s: Screen) -> None:
     side = _sidebar(s, s.ocr())
     if not side:
         raise UIError("No encuentro «Proyectos» en la barra lateral de Imagen.")
-    s.click_box(side, after=1.2)
-    s.wait("Archivados", "Nuevo proyecto", timeout=25)
+    # 25-nov-2026: con otra ventana con el foco (el Administrador de tareas), el clic en «Proyectos» no entraba y
+    # RawFlow esperaba 25 s una lista que no iba a salir: 4 intentos perdidos seguidos. Ahora, si a los 5 s no sale,
+    # trae Imagen delante y vuelve a pulsar (hasta 4 veces) antes de darlo por fallido.
+    for k in range(4):
+        s.front(force=True)
+        s.click_box(side, after=1.2)
+        t0 = time.time()
+        while time.time() - t0 < 5:
+            if s.should_stop():
+                raise UIError("Cancelado.")
+            boxes = s.ocr(scale=2 if k % 2 else 1)
+            if s.find("Archivados", boxes=boxes) or s.find("Nuevo proyecto", boxes=boxes):
+                _close_uploads(s)
+                return
+            time.sleep(0.4)
+        side = _sidebar(s, s.ocr()) or side
+    s.wait("Archivados", "Nuevo proyecto", timeout=10)
     _close_uploads(s)
 
 
@@ -413,7 +471,10 @@ def _find_row(s: Screen, project: str, tries: int = 4):
 
 
 def free_name(base: str, visible: List[str]) -> str:
-    """Primer nombre libre: base, «base #2», «base #3»… (los que se ven en Imagen y los que RawFlow ya creó)."""
+    """Primer nombre libre: base, «base n2», «base n3»… (los que se ven en Imagen y los que RawFlow ya creó).
+    25-nov-2026: antes «base #2», pero el OCR de Windows NO lee «#2» en Imagen («25 nov 2026 #2» → «25 nov 2026», a
+    cualquier tamaño y con el cursor donde sea): el nombre quedaba bien escrito y RawFlow creía que no (paso 4 parado
+    4 intentos, dos veces). «n2» lo lee siempre y no se confunde con un evento llamado «… 2»."""
     seen = {_key(t) for t in visible}
     try:
         seen |= {_key(line) for line in HIST.read_text(encoding="utf-8").splitlines()}
@@ -422,7 +483,7 @@ def free_name(base: str, visible: List[str]) -> str:
     name, n = base, 1
     while _key(name) in seen:
         n += 1
-        name = f"{base} #{n}"
+        name = f"{base} n{n}"
     return name
 
 
@@ -488,28 +549,58 @@ def _pick_folder(s: Screen, folder: Path) -> None:
     raise UIError(f"El selector de carpetas no aceptó la ruta «{folder}».")
 
 
+NAME_STAY = 3.0          # segundos que el nombre escrito debe seguir en la casilla para darlo por bueno
+
+
 def _type_name(s: Screen, name_box: dict, dng_dir: Path, project: str) -> None:
-    """Escribe el nombre en «Nombra tu proyecto» y COMPRUEBA que quedó escrito. El clic va sobre el texto que ya trae
-    la casilla (el nombre de la carpeta, «2 DNGs»). 25-nov-2026: el clic calculado bajo el rótulo no cayó en la
-    casilla, Ctrl+A seleccionó toda la página y el proyecto se creó como «2 DNGs»; luego RawFlow no lo encontraba."""
-    h = name_box["h"]
-    below = lambda b: 0 < b["y"] - name_box["y"] < 4 * h and -2 * h < b["x"] - name_box["x"] < 30 * h   # noqa: E731
+    """Escribe el nombre en «Nombra tu proyecto» y COMPRUEBA que quedó escrito Y QUE SIGUE AHÍ.
+    25-nov-2026 (visto en vivo, paso 4 parado cuatro veces): unos 9 s después de abrirse el diálogo, Imagen recoloca
+    su contenido (la casilla subió 49 px) y CAMBIA lo escrito por el nombre que ella propone («2 DNGs 0517»). RawFlow
+    escribía bien el nombre, Imagen lo pisaba, y los reintentos iban al sitio antiguo: caían fuera de la casilla y
+    Ctrl+A seleccionaba toda la página. Ahora en cada vuelta se vuelve a buscar el rótulo (la casilla está justo
+    debajo, tenga dentro el ejemplo, el nombre de la carpeta o lo que sea) y el nombre solo vale si aguanta."""
+    def look(scale: int):
+        boxes = s.ocr(scale=scale)
+        lab = s.find("Nombra tu proyecto", boxes=boxes)
+        nb = lab[0] if lab else name_box
+        h = nb["h"]
+        return nb, h, [b for b in boxes if 1.2 * h < b["y"] - nb["y"] < 3.8 * h and -2 * h < b["x"] - nb["x"] < 30 * h]
+
+    full = norm(project).strip()
+    base = norm(re.sub(r" n[0-9]+$", "", project)).strip()
+    tight = lambda t: t.replace(" ", "")                  # noqa: E731
+
+    def written() -> bool:
+        # El cursor parpadea pegado al final y el OCR a veces lee «… n2» como «… n?» o «… r-,21» (visto en vivo): con
+        # el principio exacto y ALGO detrás vale (lo acabamos de escribir nosotros sobre toda la casilla; la propuesta
+        # de Imagen, «2 DNGs 0517», no empieza así). Sin «n2» detrás («25 nov 2026» a secas) no vale.
+        for scale in (2, 1):
+            for b in look(scale)[2]:
+                t = norm(b["t"]).strip()
+                if full[:18] in t or (base != full and t.startswith(base) and len(tight(t)) > len(tight(base))):
+                    return True
+        return False
+
     time.sleep(1.0)                                       # el diálogo termina de aparecer
-    for k in range(3):
-        boxes = s.ocr(scale=2 if k else 1)
-        cur = [b for b in boxes if below(b) and norm(b["t"]).strip() in (norm(dng_dir.name), norm(project))]
-        if cur:
-            s.click_box(cur[0], after=0.4)                # dentro de la casilla, sobre su texto
+    boxes = None
+    for k in range(7):
+        if s.should_stop():
+            raise UIError("Cancelado.")
+        nb, h, inside = look(2 if k % 2 else 1)
+        if inside:
+            s.click_box(min(inside, key=lambda b: b["x"]), after=0.4)      # dentro de la casilla, sobre su texto
         else:
-            s.click(name_box["x"] + 7 * h, name_box["y"] + 2.9 * h)
+            s.click(nb["x"] + 7 * h, nb["y"] + 2.9 * h)                    # casilla vacía o sin leer: por su sitio
             time.sleep(0.4)
         s.keys("ctrl+a")
         s.type(project)
         time.sleep(0.8)
-        if any(norm(project)[:18] in norm(b["t"]) for b in s.ocr(scale=2) if below(b)):
-            return
+        if written():
+            time.sleep(NAME_STAY)                         # ¿lo pisa Imagen con su propuesta?
+            if written():
+                return
+    diag(s, "imagen-nombre-proyecto", boxes)
     raise UIError("No pude escribir el nombre del proyecto en Imagen.")
-
 
 def _create_project(s: Screen, dng_dir: Path, project: str, photo_type: str, pfile: Path) -> str:
     log = s.log
@@ -536,10 +627,10 @@ def _create_project(s: Screen, dng_dir: Path, project: str, photo_type: str, pfi
         s.esc()
         raise UIError(f"Imagen ve {m.group(1)} fotos en la carpeta y hay {n_dng} DNG: no se crea el proyecto.")
     _type_name(s, name_box, dng_dir, project)
-    for n in range(2, 8):                                 # si Imagen dice que el nombre ya existe: «… #2», «… #3»
+    for n in range(2, 8):                                 # si Imagen dice que el nombre ya existe: «… n2», «… n3»
         if not (s.find("ya existe") or s.find("already exists") or s.find("nombre en uso")):
             break
-        project = f"{project.rsplit(' #', 1)[0]} #{n}"
+        project = f"{re.sub(r' (?:#|n)[0-9]+$', '', project)} n{n}"
         log(f"Imagen: ese nombre ya existe, uso «{project}».")
         s.keys("ctrl+a")
         s.type(project)
@@ -708,6 +799,17 @@ def _open_download_dialog(s: Screen, dng_dir: Path, project: str) -> None:
         rev = [b for b in buttons if "revisar" in norm(b["t"]) or "ediciones" in norm(b["t"])]   # a veces «evisar…»
         if rev:
             break
+    if not rev and row:
+        # 25-nov-2026: 6 lecturas seguidas sin leer el botón (blanco sobre rojo), con el proyecto «Lista para reseña»
+        # y el botón en pantalla: un intento entero perdido. Si la fila dice que está lista, el botón está en su
+        # columna («Siguiente paso»), a la altura de la fila: se pulsa por su sitio. Lo siguiente (el diálogo de
+        # descarga) se comprueba igual, así que un clic en falso no pasa de ahí.
+        st, _n, _b = _row_parts(s, row, boxes)
+        head = [b for b in boxes if norm(b["t"]).strip() in ("siguiente paso", "seguiente paso", "next step")
+                and s.inside(b, (0.6, 0.08, 1, 0.2))]
+        if head and any(k in norm(st) for k in READY):
+            s.log("   («Revisar Ediciones» no se lee: lo pulso por su sitio en la fila)")
+            rev = [{"t": "Revisar Ediciones", "x": head[0]["x"], "y": row["y"], "w": 0.058 * s.rect[2], "h": row["h"]}]
     if not rev:
         diag(s, "sin-revisar-ediciones", boxes)
         raise UIError(f"El proyecto «{project}» aún no ofrece «Revisar Ediciones».")
@@ -724,16 +826,52 @@ def _open_download_dialog(s: Screen, dng_dir: Path, project: str) -> None:
         raise UIError(f"Imagen quiere descargar en otra carpeta ({paths[0]}), no en «{dng_dir.parent.name}».")
 
 
+def _download_button(s: Screen, boxes) -> Optional[dict]:
+    """El BOTÓN rojo «Descargar ediciones» del diálogo de descarga (None si el diálogo no está abierto).
+    25-nov-2026 (visto en vivo, descarga que nunca arrancaba): el OCR lee el botón (blanco sobre rojo) a trozos,
+    «Desca» + «ar ediciones»; lo único que leía entero era el TÍTULO del diálogo, que se llama igual, y el clic iba
+    al título. El botón es lo que queda ABAJO del todo, bajo «Explorar»; si ni a trozos se lee, se pulsa por su sitio
+    (misma distancia bajo «Explorar» que el título tiene encima, ×1,5)."""
+    ex = [b for b in boxes if norm(b["t"]).strip() == "explorar"]
+    if not ex or not any("tus fotos siguen" in norm(b["t"]) for b in boxes):
+        return None
+    e = min(ex, key=lambda b: b["y"])
+    low = [b for b in boxes if b["y"] > e["y"] + 3 * e["h"] and len(b["t"].strip()) <= 24 and e["x"] - 40 * e["h"] < b["x"] < e["x"] + e["w"] + 2 * e["h"]      # dentro del diálogo, no la lista de detrás
+           and (norm(b["t"]).strip().startswith("desca") or "ediciones" in norm(b["t"]))]
+    if low:
+        y = max(b["y"] for b in low)
+        line = [b for b in low if abs(b["y"] - y) < 0.8 * b["h"]]
+        x0, x1 = min(b["x"] for b in line), max(b["x"] + b["w"] for b in line)
+        return {"t": "Descargar ediciones", "x": x0, "y": y, "w": x1 - x0, "h": line[0]["h"]}
+    title = [b for b in boxes if norm(b["t"]).strip() == "descargar ediciones" and b["y"] < e["y"] - 2 * e["h"]]
+    if not title:
+        return None
+    d = e["y"] - min(b["y"] for b in title)
+    cx, cy = e["x"] + e["w"] / 2 - 0.56 * d, e["y"] + e["h"] / 2 + 1.51 * d
+    return {"t": "Descargar ediciones", "x": cx - 2 * e["h"], "y": cy - e["h"] / 2, "w": 4 * e["h"], "h": e["h"]}
+
+
 def _await_download(s: Screen, dng_dir: Path, mark, dngs: List[Path]):
     """Espera a que Imagen termine de bajar las ediciones (su registro dice al momento si fue bien o mal). Si
     pregunta dónde revisar, se elige «Bridge (Adobe Camera Raw)»."""
     t0, t_ok, asked = time.time(), None, False
     limit = max(300, 2 * len(dngs))
     res = None
+    t_tap, taps = time.time(), 0
     while time.time() - t0 < limit:
         if s.should_stop():
             raise UIError("Cancelado.")
         res = download_result(mark, dng_dir) if mark[0] else None
+        # 25-nov-2026: el clic en «Descargar ediciones» no entró (otra ventana se puso delante), el diálogo siguió
+        # abierto y RawFlow esperó 20 min una descarga que no había empezado. Si a los RETAP_AFTER s el botón sigue
+        # ahí y ningún DNG lleva ediciones, se vuelve a pulsar (el diálogo se cierra en cuanto la descarga empieza).
+        if res is None and taps < RETAP_MAX and time.time() - t_tap > RETAP_AFTER:
+            t_tap = time.time()
+            btn = _download_button(s, s.ocr(scale=2 if taps % 2 else 1))
+            if btn and len(core.without_imagen(dngs)) == len(dngs):
+                taps += 1
+                s.log(f"   (el botón «Descargar ediciones» sigue ahí: lo pulso otra vez, {taps} de {RETAP_MAX})")
+                s.click_box(btn, after=1)
         if not asked:
             b = s.find("Bridge (Adobe Camera Raw)") or s.find("Adobe Camera Raw")
             if b:
@@ -761,7 +899,14 @@ def _download_edits(s: Screen, dng_dir: Path, project: str) -> None:
         _open_download_dialog(s, dng_dir, project)
         _prog(0.78)
         mark = _log_mark()
-        s.tap("Descargar ediciones", exact=True, timeout=20, pick=-1, after=1)      # el botón, no el título
+        btn, t_b, k = None, time.time(), 0
+        while btn is None and time.time() - t_b < 20:                               # el botón, no el título
+            btn = _download_button(s, s.ocr(scale=2 if k % 2 else 1))
+            k += 1
+        if btn is None:
+            diag(s, "sin-boton-descargar")
+            raise UIError("No encuentro el botón «Descargar ediciones» en Imagen.")
+        s.click_box(btn, after=1)
         log("Imagen: descargando ediciones a los DNG…" + (f" (intento {intento} de {DL_TRIES})" if intento > 1 else ""))
         live.set("imagen", "descargando las ediciones a los DNG…")
         res = _await_download(s, dng_dir, mark, dngs)
@@ -898,6 +1043,28 @@ def _thumbs(s: Screen, boxes, stems: List[str]) -> List[dict]:
     return [b for b in boxes if _key(b["t"])[:7] in keys and s.inside(b, (0.12, 0.2, 0.9, 0.95))]
 
 
+def _bridge_export_button(s: Screen, tries: int = 4) -> Optional[dict]:
+    """El botón azul «Exportar» del diálogo de exportación de Bridge (arriba a la derecha, sobre «Cancelar»).
+    25-nov-2026 (visto en vivo, evento parado con las ediciones ya bajadas): el OCR lee ese botón (blanco sobre azul)
+    como «capono» o «Expottor», nunca «Exportar» exacto. Vale un parecido; y si ni eso, está justo ENCIMA de
+    «Cancelar», que sí se lee: se pulsa por su sitio. Siempre a tamaño real (ampliado ×2, las cajas de este diálogo
+    pequeño salen desplazadas unos 30 px)."""
+    from difflib import SequenceMatcher
+    like = lambda t, w: SequenceMatcher(None, norm(t).strip(), w).ratio()      # noqa: E731
+    for k in range(tries):
+        if k:
+            time.sleep(0.5)
+        reg = [b for b in s.ocr() if s.inside(b, (0.7, 0.03, 1, 0.35))]         # (0.03: el título «Exportar» no)
+        hit = [b for b in reg if like(b["t"], "exportar") >= 0.7]
+        if hit:
+            return min(hit, key=lambda b: b["y"])
+        can = [b for b in reg if like(b["t"], "cancelar") >= 0.7]
+        if can:
+            c = min(can, key=lambda b: b["y"])
+            return {"t": "Exportar", "x": c["x"], "y": c["y"] - 3.8 * c["h"], "w": c["w"], "h": c["h"]}
+    return None
+
+
 def bridge_export(s: Screen, dng_dir: Path, out_dir: Path, expected: int, progress=lambda f: None) -> int:
     """Bridge abre la carpeta de DNG, selecciona todo y exporta JPEG (calidad 12) a `out_dir` con
     Archivo → Exportar a → Exportación personalizada. Devuelve cuántos JPEG hay en `out_dir`."""
@@ -992,10 +1159,17 @@ def bridge_export(s: Screen, dng_dir: Path, out_dir: Path, expected: int, progre
         num, top = quality(s.ocr())
         if not (top or (num and num["t"].strip() == "12")):
             raise UIError("No pude poner la calidad JPEG en máxima en Bridge.")
-    go = [b for b in s.ocr() if norm(b["t"]).strip() == "exportar" and s.inside(b, (0.75, 0, 1, 0.3))]
+    go = _bridge_export_button(s)
     if not go:
+        diag(s, "bridge-sin-boton-exportar")
         raise UIError("No encuentro el botón «Exportar» del diálogo de Bridge.")
-    s.click_box(go[0], after=0.8)
+    s.click_box(go, after=0.8)
+    for _ in range(2):                           # ¿sigue abierto el diálogo «Exportar»? el clic no entró: otra vez
+        time.sleep(2.5)
+        if not any(norm(w["title"]).strip() == "exportar" for w in ws.windows(exe=s.exe)):
+            break
+        go = _bridge_export_button(s) or go
+        s.click_box(go, after=0.8)
     t0 = last_t = time.time()
     last_n = 0
     while True:                                  # vigilante: sin JPEG nuevo mucho más de lo normal → reintento

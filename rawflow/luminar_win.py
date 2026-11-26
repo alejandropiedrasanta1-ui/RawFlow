@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 EXE = "Luminar Neo.exe"
-PRESET = "CINEMA AJUSTE"
+PRESETS = ("CINEMA AJUSTE", "CINEMA")    # el primero que exista en Mis preajustes (26-nov-2026: el del usuario es «CINEMA»)
+PRESET = PRESETS[0]                     # el que se usa: lo fija available() con el que encuentre
 _ROAM = Path(os.environ.get("APPDATA") or (Path.home() / "AppData/Roaming"))
 DATA = _ROAM / "Luminar Neo"
 Log = Callable[[str], None]
@@ -38,15 +39,37 @@ def app_path() -> Optional[Path]:
     return None
 
 
-def preset_exists(name: str = PRESET) -> bool:
-    """¿Está «CINEMA AJUSTE» en Mis preajustes? (cada preajuste es una carpeta .lnp con su template.lmps en JSON)."""
+def _user_presets() -> List[str]:
+    """Nombres de Mis preajustes (cada preajuste es una carpeta .lnp con su template.lmps en JSON)."""
+    out = []
     for f in (DATA / "Data" / "Presets" / "Users").glob("*.lnp/template.lmps"):
         try:
-            if json.loads(f.read_text(encoding="utf-8")).get("name", "").strip().lower() == name.lower():
-                return True
+            out.append(str(json.loads(f.read_text(encoding="utf-8")).get("name", "")).strip())
         except (OSError, ValueError):
             continue
-    return False
+    return out
+
+
+def find_preset() -> Optional[str]:
+    """El nombre, tal cual está en Luminar, del primero de PRESETS que exista; None si ninguno."""
+    have = {n.lower(): n for n in _user_presets()}
+    return next((have[p.lower()] for p in PRESETS if p.lower() in have), None)
+
+
+def preset_exists(name: Optional[str] = None) -> bool:
+    if name is None:
+        return find_preset() is not None
+    return name.lower() in {n.lower() for n in _user_presets()}
+
+
+def _is_item(text: str, name: str) -> bool:
+    """¿Este rótulo de la lista es el preajuste `name`? Los largos salen cortados («CINEMA AJUS…»); uno corto como
+    «CINEMA» se compara entero (que no valga «Cinematic» ni otro que empiece igual)."""
+    from . import imagen_win as iw
+    t, n = iw.norm(text).strip(" .…"), iw.norm(name)
+    if len(n) >= 10:
+        return n[:10] in t
+    return t == n
 
 
 def available() -> Tuple[bool, str]:
@@ -57,8 +80,11 @@ def available() -> Tuple[bool, str]:
         return False, "desactivado en pruebas"
     if not app_path():
         return False, "no encuentro Luminar Neo"
-    if not preset_exists():
-        return False, f"no encuentro el preajuste «{PRESET}» en Mis preajustes de Luminar"
+    global PRESET
+    found = find_preset()
+    if not found:
+        return False, f"no encuentro el preajuste «{' » ni «'.join(PRESETS)}» en Mis preajustes de Luminar"
+    PRESET = found
     return True, ""
 
 
@@ -221,6 +247,8 @@ def _new_catalog(s, path: Path, log: Log) -> None:
     _save_as(s, path)
     t0 = time.time()
     while time.time() - t0 < 60:                     # el catálogo NUEVO está vacío: «Aún no hay fotos»
+        if s.should_stop():
+            raise iw.UIError("Cancelado.")
         boxes = s.ocr()
         if s.find("Aún no hay fotos", boxes=boxes):
             return
@@ -248,14 +276,14 @@ def _select_all(s) -> None:
     time.sleep(1.0)
 
 
-def _apply_preset(s, log: Log, name: str = PRESET) -> None:
-    """Pestaña Preajustes (barra derecha) → Mis Preajustes → «CINEMA AJUSTE» (con las fotos seleccionadas)."""
+def _apply_preset(s, log: Log, name: Optional[str] = None) -> None:
+    """Pestaña Preajustes (barra derecha) → Mis Preajustes → el preajuste (con las fotos seleccionadas)."""
     from . import imagen_win as iw
-    key = name[:10].lower()                          # «cinema aju»: en la lista sale cortado («CINEMA AJUS…»)
+    name = name or PRESET
     right = (0.8, 0.05, 1.0, 0.95)
     for _ in range(4):
         boxes = s.ocr()
-        if any(key in iw.norm(b["t"]) for b in boxes if s.inside(b, right)):
+        if any(_is_item(b["t"], name) for b in boxes if s.inside(b, right)):
             break
         mis = s.find("Mis Preajustes", boxes=boxes, region=right)
         if mis:
@@ -267,7 +295,7 @@ def _apply_preset(s, log: Log, name: str = PRESET) -> None:
         else:
             s.keys("t")                              # atajo de la vista Preajustes
             time.sleep(1.5)
-    item = [b for b in s.ocr() if key in iw.norm(b["t"]) and s.inside(b, right)]
+    item = [b for b in s.ocr() if _is_item(b["t"], name) and s.inside(b, right)]
     if not item:
         iw.diag(s, "luminar-preajuste")
         raise iw.UIError(f"No encuentro el preajuste «{name}» en Mis preajustes de Luminar.")
@@ -306,9 +334,15 @@ def _sync_all(s, n: int, log: Log) -> None:
     _acciones(s, "Pegar Ajustes")
     t0 = time.time()
     time.sleep(2)
-    while time.time() - t0 < max(60, n * 1.5):      # mientras se ve «Pegando ajustes…»
-        if not any("pegando" in iw.norm(b["t"]) for b in s.ocr()):
-            break
+    # 25-nov-2026 (revisión): salía a la PRIMERA lectura sin «pegando» (el OCR la falla a veces, o Luminar aún no la
+    # dibujó): ahora hacen falta 3 lecturas seguidas sin ella (alternando tamaño), y se mira si pulsaron «Parar».
+    quiet, j = 0, 0
+    while time.time() - t0 < max(60, n * 1.5) and quiet < 3:     # mientras se ve «Pegando ajustes…»
+        if s.should_stop():
+            raise iw.UIError("Cancelado.")
+        busy = any("pegando" in iw.norm(b["t"]) for b in s.ocr(scale=2 if j % 2 else 1))
+        j += 1
+        quiet = 0 if busy else quiet + 1
         time.sleep(1)
     time.sleep(2)
 
@@ -387,6 +421,8 @@ def _export(s, out: Path, n: int, log: Log, should_stop=lambda: False, progress=
         s.tap("Exportar", exact=True, timeout=15, region=(0.85, 0, 0.97, 0.06), after=1.5)
         k, t1, j, seen = 0, time.time(), 0, ""
         while time.time() - t1 < max(20, n * 0.15):  # tras pegar a cientos de fotos el menú sale vacío o gris un rato
+            if should_stop() or s.should_stop():
+                raise iw.UIError("Cancelado.")
             boxes = s.ocr(scale=2 if j % 2 else 1)
             j += 1
             for b in boxes:
@@ -404,7 +440,18 @@ def _export(s, out: Path, n: int, log: Log, should_stop=lambda: False, progress=
     else:
         iw.diag(s, "luminar-exportar")
         raise iw.UIError(f"Luminar no seleccionó las {n} fotos para exportar.")
-    q = [b for b in s.ocr() if "100" in b["t"] and "calidad" in iw.norm(b["t"])]
+    # 25-nov-2026 (revisión): era UNA lectura a tamaño real exigiendo «100» literal; el OCR parte o se come cifras en
+    # este menú («411» → «41»). Se prueba primero lo ya leído y luego ~10 s alternando tamaño. Nunca otra calidad.
+    is_q = lambda b: "calidad" in iw.norm(b["t"]) and "100" in re.sub(r"\s", "", b["t"])     # noqa: E731
+    q = [b for b in boxes if is_q(b)]
+    t_q, j = time.time(), 0
+    while not q and time.time() - t_q < 10:
+        if should_stop() or s.should_stop():
+            raise iw.UIError("Cancelado.")
+        q = [b for b in s.ocr(scale=2 if j % 2 else 1) if is_q(b)]
+        j += 1
+        if not q:
+            time.sleep(0.5)
     if not q:
         iw.diag(s, "luminar-exportar")
         raise iw.UIError("No encuentro «JPEG · 100 % de calidad» en Exportar de Luminar.")
@@ -434,9 +481,32 @@ def _export(s, out: Path, n: int, log: Log, should_stop=lambda: False, progress=
 def _add_folder(s, src: Path, n: int, log: Log) -> None:
     from . import imagen_win as iw
     log(f"Luminar: añadiendo las {n:,} fotos de «{src.name}»…")
-    s.front(force=True)
-    s.keys("ctrl+shift+n")                           # Archivo → Añadir carpeta con imágenes…
-    time.sleep(1.5)
+    from . import winscreen as ws
+    picker = lambda: [w for w in ws.windows(exe=s.exe)                                 # noqa: E731
+                      if any(k in w["title"].lower() for k in ("carpeta", "folder", "abrir", "examinar"))]
+    for intento in range(3):
+        # 25-nov-2026 (revisión): el atajo se mandaba UNA vez; si Luminar aún cambiaba de catálogo o no tenía el
+        # foco se perdía, y tras 30 s se repetía TODO el paso. Ahora, si a los 8 s no hay selector de carpetas, se
+        # manda otra vez, solo con Luminar delante y sin ningún selector abierto (dentro de uno, Ctrl+Mayús+N
+        # crearía una «Nueva carpeta»). 26-nov-2026 (revisión): si Luminar no quedaba delante se salía del bucle SIN
+        # mandar el atajo; ahora se vuelve a traer delante y se intenta otra vez.
+        if picker():
+            break
+        s.front(force=True)
+        if (ws.foreground().get("exe") or "").lower() != s.exe.lower():
+            time.sleep(1.0)
+            continue
+        s.keys("ctrl+shift+n")                       # Archivo → Añadir carpeta con imágenes…
+        t0 = time.time()
+        while not picker() and time.time() - t0 < 8:
+            if s.should_stop():
+                raise iw.UIError("Cancelado.")
+            time.sleep(0.4)
+        if picker():
+            break
+        if not intento:
+            log("   (no se abrió el selector de carpetas: vuelvo a pedirlo)")
+    time.sleep(0.5)
     iw._pick_folder(s, src)
     t0 = time.time()
     while time.time() - t0 < max(120, n * 2):        # hasta que se ve la carpeta con sus fotos

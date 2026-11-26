@@ -1,6 +1,7 @@
 """Widgets dibujados a mano para un look moderno y consistente en Mac y Windows."""
 from __future__ import annotations
 
+import math
 from typing import List
 
 from PySide6.QtCore import (QEasingCurve, QPointF, QRectF, Qt, QTimer,
@@ -564,6 +565,10 @@ class DriveCard(QFrame):
         self._a_hov = QVariantAnimation(self, duration=150, easingCurve=QEasingCurve.Type.OutCubic)
         self._a_hov.valueChanged.connect(lambda v: self._blend("_hov", v))
         self._phase = 0.0
+        import time as _time
+        self._now = _time.monotonic
+        self._born = self._now()                 # (26-nov-2026) «¡encontré una!»: ondas desde el icono al aparecer
+        self._done_t = 0.0                       # …y al contar sus fotos: el número sube y el icono da un salto
         self.setFixedHeight(self.H)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMouseTracking(True)
@@ -584,11 +589,24 @@ class DriveCard(QFrame):
             self._timer.start()
         self.update()
 
+    RIPPLE, COUNT = 1.6, 0.9                     # s: ondas al aparecer; el número contando al terminar
+
     def set_done(self, found: int, found_bytes: int, formats: List[str]):
+        new = self.state == "scanning" or found != self.found
         self.state = "done" if found else "empty"
         self.found, self.found_bytes, self.formats = found, found_bytes, formats
-        self._timer.stop()
+        if new and found and not T.reduce_motion():
+            self._done_t = self._now()           # el número sube contando y el icono salta
+            self._timer.start()
+        elif not self._animating():
+            self._timer.stop()
         self.update()
+
+    def _animating(self) -> bool:
+        if T.reduce_motion():
+            return False
+        now = self._now()
+        return now - self._born < self.RIPPLE or (self._done_t and now - self._done_t < self.COUNT)
 
     def set_events(self, n: int):
         if n != self.events:
@@ -597,6 +615,8 @@ class DriveCard(QFrame):
 
     def _tick(self):
         self._phase = (self._phase + 0.01) % 1.0
+        if self.state != "scanning" and not self._animating():
+            self._timer.stop()                   # terminó todo: no se repinta más
         self.update()
 
     # --- interacción ----------------------------------------------------
@@ -654,13 +674,45 @@ class DriveCard(QFrame):
         acc = QColor(T.ACCENT)
         acc.setAlpha(170)
         border = mix(mix(QColor(T.BORDER), QColor(T.BORDER_HI), hov), acc, sel)
-        p.setPen(QPen(border, 1.3))
+        now = self._now()
+        rip = 1.0 if T.reduce_motion() else min(1.0, (now - self._born) / self.RIPPLE)      # 0→1 al aparecer
+        cnt = 1.0 if not self._done_t else min(1.0, (now - self._done_t) / self.COUNT)     # 0→1 al contar
+        glow = (1.0 - rip) ** 2                   # el borde se enciende al llegar y se apaga
+        flash = (1.0 - cnt) ** 2 if self._done_t else 0.0
+        if glow > 0.01 or flash > 0.01:
+            halo = QColor(T.OK if flash > glow else T.ACCENT)
+            halo.setAlphaF(min(1.0, 0.9 * max(glow, flash)))
+            border = mix(border, halo, max(glow, flash))
+        p.setPen(QPen(border, 1.3 + 1.7 * max(glow, flash)))
         p.setBrush(bg)
         p.drawRoundedRect(r, 14, 14)
 
         # icono: tarjeta SD, o carpeta si se arrastró a RawFlow
         ix, iy = r.left() + 18, r.top() + 18
         icon = QRectF(ix, iy, 40, 40)
+        if rip < 1.0:                             # ondas tipo sonar desde el icono: «¡encontré una!»
+            p.save()
+            p.setClipRect(r)
+            for k0 in (0.0, 0.28):
+                t = (rip - k0) / (1.0 - k0) if rip > k0 else 0.0
+                if 0.0 < t < 1.0:
+                    e = QEasingCurve(QEasingCurve.Type.OutCubic).valueForProgress(t)
+                    rad = 20 + 70 * e
+                    ring = QColor(T.ACCENT)
+                    ring.setAlphaF(0.75 * (1.0 - t))
+                    p.setPen(QPen(ring, 2.0 + 2.0 * (1.0 - t)))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawEllipse(icon.center(), rad, rad)
+            p.restore()
+        pop = 1.0
+        if self._done_t and cnt < 1.0:            # el icono da un saltito al terminar de contar
+            pop = 1.0 + 0.18 * math.sin(math.pi * min(1.0, cnt / 0.45))
+        p.save()
+        if pop != 1.0:
+            c0 = icon.center()
+            p.translate(c0)
+            p.scale(pop, pop)
+            p.translate(-c0)
         p.setPen(Qt.PenStyle.NoPen)
         chip = mix(QColor(T.BORDER_HI), QColor(T.ACCENT), sel)
         p.setBrush(chip)
@@ -685,6 +737,7 @@ class DriveCard(QFrame):
             p.setBrush(chip)
             for k in range(3):
                 p.drawRect(QRectF(sx + 5 + k * 3.6, sy + 2.5, 1.6, 5))
+        p.restore()
 
         # textos (el nombre deja sitio al check; la línea de debajo ya no lo tiene encima y usa todo el ancho)
         tx = ix + 56
@@ -776,8 +829,13 @@ class DriveCard(QFrame):
             p.setPen(QColor(T.FAINT))
             p.drawText(QPointF(bar.left(), ty), "Sin archivos RAW")
         else:
-            p.setPen(mix(QColor(T.MUTED), QColor(T.ACCENT), sel))
-            txt = f"{self.found:,} RAW  ·  {human_size(self.found_bytes)}"
+            col = mix(QColor(T.MUTED), QColor(T.ACCENT), sel)
+            if flash > 0.01:
+                col = mix(col, QColor(T.OK), flash)
+            p.setPen(col)
+            shown = self.found if cnt >= 1.0 else int(round(
+                self.found * QEasingCurve(QEasingCurve.Type.OutCubic).valueForProgress(cnt)))
+            txt = f"{shown:,} RAW  ·  {human_size(self.found_bytes)}"
             if self.events:
                 txt += f"  ·  {self.events} evento{'s' if self.events != 1 else ''}"
             p.drawText(QPointF(bar.left(), ty), txt)

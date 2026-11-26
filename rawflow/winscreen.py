@@ -260,16 +260,47 @@ def move(x: float, y: float) -> None:
     _send(_mouse(0x0001 | 0x8000 | 0x4000, ax, ay))                 # MOVE | ABSOLUTE | VIRTUALDESK
 
 
+AVOID: List[int] = []     # ventanas de RawFlow que reciben clics (botón «Parar»): se apartan si un clic cae encima
+
+
+def _out_of_the_way(x: float, y: float) -> List[int]:
+    """Esconde un momento las ventanas de AVOID que tapan (x, y): el clic de RawFlow va a la app de debajo, no al
+    botón «Parar» (revisión 26-nov-2026: se lo tragaba, y dos seguidos en 4 s paraban el evento)."""
+    hidden = []
+    user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    for hwnd in list(AVOID):
+        try:
+            r = wintypes.RECT()
+            if user32.IsWindowVisible(hwnd) and user32.GetWindowRect(hwnd, ctypes.byref(r)) \
+                    and r.left <= x < r.right and r.top <= y < r.bottom:
+                user32.ShowWindow(hwnd, 0)                          # SW_HIDE
+                hidden.append(hwnd)
+        except Exception:  # noqa: BLE001
+            continue
+    if hidden:
+        time.sleep(0.05)
+    return hidden
+
+
 def click(x: float, y: float, n: int = 1, right: bool = False) -> None:
-    move(x, y)
-    time.sleep(0.06)
-    down, up = (0x0008, 0x0010) if right else (0x0002, 0x0004)
-    for i in range(max(1, n)):
-        _send(_mouse(down))
-        time.sleep(0.03)
-        _send(_mouse(up))
-        if i < n - 1:
-            time.sleep(0.08)
+    hidden = _out_of_the_way(x, y)
+    try:
+        move(x, y)
+        time.sleep(0.06)
+        down, up = (0x0008, 0x0010) if right else (0x0002, 0x0004)
+        for i in range(max(1, n)):
+            _send(_mouse(down))
+            time.sleep(0.03)
+            _send(_mouse(up))
+            if i < n - 1:
+                time.sleep(0.08)
+    finally:
+        if hidden:
+            time.sleep(0.15)
+            for hwnd in hidden:
+                user32.ShowWindow(hwnd, 4)                          # SW_SHOWNOACTIVATE: vuelve sin coger el foco
 
 
 def scroll(x: float, y: float, clicks: int) -> None:
@@ -374,6 +405,19 @@ def windows(title_part: str = "", exe: str = "") -> List[dict]:
         return True
     user32.EnumWindows(each, 0)                                     # en orden Z: la de delante primero
     return found
+
+
+def minimize_quiet(exe_prefixes: Tuple[str, ...]) -> int:
+    """Minimiza SIN activarlas (no roba el foco ni el ratón) las ventanas visibles de los programas cuyo .exe empieza
+    por alguno de `exe_prefixes` (en minúsculas). Para lo que trabaja solo y no hace falta ver (DxO por lotes).
+    Devuelve cuántas minimizó."""
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    n = 0
+    for w in windows():
+        if not w["min"] and w["exe"].lower().startswith(exe_prefixes):
+            user32.ShowWindow(w["hwnd"], 7)                         # SW_SHOWMINNOACTIVE
+            n += 1
+    return n
 
 
 def foreground() -> dict:

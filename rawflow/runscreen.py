@@ -10,10 +10,10 @@ import math
 import time
 from typing import Callable, List, Optional
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Slot
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QPainter, QPainterPath, QPen,
                            QPixmap, QRadialGradient)
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
 
 from . import theme as T
 from .overlays import LEVEL_MAIN, set_level
@@ -305,7 +305,7 @@ class RunScreen(QWidget):
     def _esc_hint(self, p: QPainter, W, H):
         """«Para cancelar, pulsa [esc] [esc] [esc]» con teclas dibujadas: se entiende de un vistazo."""
         f, fk = self._f(14, QFont.Weight.DemiBold), self._f(12, QFont.Weight.Bold)
-        pre, post = "Para cancelar, pulsa", "y luego reintenta desde este paso"
+        pre, post = "Para cancelar, pulsa", "o el botón «Parar» (abajo a la izquierda)"
         fm, fmk = QFontMetrics(f), QFontMetrics(fk)
         kw, gap = fmk.horizontalAdvance("esc") + 18, 6
         total = fm.horizontalAdvance(pre) + 14 + 3 * kw + 2 * gap + 14 + fm.horizontalAdvance(post)
@@ -369,10 +369,22 @@ class RunScreen(QWidget):
         if m:
             if lines:
                 lines.append(("", T.FAINT, self._f(6)))
-            gpu = m.get("gpu")                                   # None: no se puede leer (Windows): no «GPU — %»
-            lines.append((f"CPU {m.get('cpu', 0):.0f} %    " + (f"GPU {gpu} %    " if gpu is not None else "")
-                          + f"Memoria {dec(m.get('mem_used', 0))} de {m.get('mem_total', 0):.0f} GB",
-                          T.TEXT, self._f(13, QFont.Weight.DemiBold)))
+            bold = self._f(13, QFont.Weight.DemiBold)
+            hot = lambda v: T.ACCENT if (v or 0) >= 90 else T.TEXT        # noqa: E731  (a tope: en lima)
+            cpu = m.get("cpu", 0)
+            lines.append((f"CPU  {cpu:.0f} %   ·   {m.get('ncpu', 1)} hilos", hot(cpu), bold))
+            gpu = m.get("gpu")                                   # None: no se puede leer (sin NVIDIA): no «GPU — %»
+            if gpu is not None:
+                txt = f"GPU  {gpu} %"
+                if m.get("vram_total"):
+                    txt += f"   ·   memoria {dec(m.get('vram_used') or 0)} de {m['vram_total']:.0f} GB"
+                if m.get("gpu_temp") is not None:
+                    txt += f"   ·   {m['gpu_temp']} °C"
+                lines.append((txt, hot(gpu), bold))
+            ram = f"RAM  {dec(m.get('mem_used', 0))} de {m.get('mem_total', 0):.0f} GB"
+            if m.get("mem_pct") is not None:
+                ram += f"   ·   {m['mem_pct']:.0f} %"
+            lines.append((ram, T.TEXT, bold))
             lines.append((f"Red  ↑ {dec(m.get('up', 0))} MB/s    ↓ {dec(m.get('down', 0))} MB/s",
                           T.MUTED, self._f(13)))
             ncpu = max(1, m.get("ncpu", 1))
@@ -400,8 +412,7 @@ class RunScreen(QWidget):
                     p.setBrush(QColor(T.ACCENT))
                     p.drawEllipse(QPointF(x0 + 4, y + lh / 2), 4, 4)
                     txt, x0 = txt[2:], x0 + 16
-                is_gpu_full = txt.startswith("CPU") and m.get("gpu") is not None and m.get("gpu", 0) >= 90
-                p.setPen(QColor(T.ACCENT if is_gpu_full else col))
+                p.setPen(QColor(col))
                 p.drawText(QRectF(x0, y, r.right() - 20 - x0, lh), Qt.AlignmentFlag.AlignVCenter,
                            QFontMetrics(fn).elidedText(txt, Qt.TextElideMode.ElideRight, int(r.right() - 20 - x0)))
             y += lh
@@ -693,3 +704,71 @@ class RunScreen(QWidget):
         p.setFont(self._f(15))
         p.drawText(QRectF(0, H * 0.875 + 34, self.width(), 24), Qt.AlignmentFlag.AlignCenter,
                    p.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, wmax))
+
+
+class StopButton(QWidget):
+    """Botón «Parar» SIEMPRE a mano durante el evento (25-nov-2026, pedido del usuario: Esc ×3 no le respondía y no
+    había otra forma de parar). Es una ventanita aparte, encima de la pantalla de proceso (que no recibe clics), abajo
+    a la izquierda. Dos clics para que uno suelto no pare un evento de horas: el primero pregunta («¿Parar? Pulsa otra
+    vez») y a los 4 s vuelve a su sitio. No coge el foco (no estorba a las apps que RawFlow maneja) ni sale en las
+    capturas que RawFlow lee."""
+    stop = Signal()
+
+    def __init__(self):
+        flags = (Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+                 | Qt.WindowType.WindowDoesNotAcceptFocus)
+        super().__init__(None, flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.btn = QPushButton("■  Parar", objectName="danger")
+        self.btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn.setMinimumSize(190, 48)
+        self.btn.setStyleSheet(                            # fondo SÓLIDO: lo transparente de una ventana así no recibe clics
+            f"QPushButton {{ background: {T.SURFACE}; border: 1px solid {T.DANGER}; color: {T.DANGER}; "
+            f"border-radius: 12px; font-weight: 600; font-size: 15px; padding: 0 18px; }}"
+            f"QPushButton:hover {{ background: {T.SURFACE_2}; }}"
+            f"QPushButton:disabled {{ color: {T.MUTED}; border-color: {T.BORDER_HI}; }}")
+        self.btn.clicked.connect(self._clicked)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.btn)
+        self._armed = False
+        self._back = QTimer(self, interval=4000, singleShot=True)
+        self._back.timeout.connect(self._reset)
+
+    def _reset(self):
+        self._armed = False
+        self.btn.setEnabled(True)
+        self.btn.setText("■  Parar")
+
+    def _clicked(self):
+        if not self._armed:
+            self._armed = True
+            self.btn.setText("¿Parar? Pulsa otra vez")
+            self._back.start()
+            return
+        self._back.stop()
+        self.btn.setText("Parando…")
+        self.btn.setEnabled(False)
+        self.stop.emit()
+
+    def open(self, screen=None):
+        """Abajo a la izquierda de `screen` (la pantalla de proceso)."""
+        self._back.stop()
+        self._reset()
+        self.adjustSize()
+        g = (screen or QGuiApplication.primaryScreen()).geometry()
+        self.move(g.left() + 28, g.bottom() - self.height() - 28)
+        self.show()
+        self.raise_()
+        set_level(self, LEVEL_MAIN + 1)
+        import sys
+        if sys.platform == "win32":                       # los clics de RawFlow que caigan aquí van a la app de debajo
+            try:
+                from . import winscreen
+                hwnd = int(self.winId())
+                if hwnd not in winscreen.AVOID:
+                    winscreen.AVOID.append(hwnd)
+            except Exception:  # noqa: BLE001
+                pass

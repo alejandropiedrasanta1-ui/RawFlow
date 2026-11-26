@@ -39,13 +39,16 @@ class Saltada(Exception):
 SOLO_MAC = sys.platform != "darwin"
 
 
-def prueba(titulo: str, solo_mac: str = ""):
-    """`solo_mac`: motivo por el que la prueba solo tiene sentido en el Mac; en otro sistema sale como «saltada»."""
+def prueba(titulo: str, solo_mac: str = "", solo_win: str = ""):
+    """`solo_mac` / `solo_win`: motivo por el que la prueba solo tiene sentido en el Mac / en Windows; en el otro
+    sistema sale como «saltada»."""
     def deco(fn):
-        if solo_mac:
+        if solo_mac or solo_win:
             def envuelta():
-                if SOLO_MAC:
+                if solo_mac and SOLO_MAC:
                     raise Saltada(f"solo Mac: {solo_mac}")
+                if solo_win and sys.platform != "win32":
+                    raise Saltada(f"solo Windows: {solo_win}")
                 return fn()
             envuelta.__name__ = fn.__name__
             PRUEBAS.append((titulo, envuelta))
@@ -988,8 +991,9 @@ def p42():
     for q in list(dngs.rglob("*")) + list((ev / core.IMAGEN_SUBFOLDER).glob("*")) + list(fin.glob("*")):
         if q.is_file():
             os.utime(q, (viejo, viejo))
-    vid = td.write(ev / core.PRES_SUBFOLDER / "Presentación.mp4", b"MP4")
-    os.utime(vid, (viejo + 60, viejo + 60))
+    for k in ("horizontal", "vertical"):
+        vid = td.write(ev / core.PRES_SUBFOLDER / f"Presentación {k}.mp4", b"MP4")
+        os.utime(vid, (viejo + 60, viejo + 60))
     videos = []
     with td._Falsos() as f:
         def present(self_):
@@ -997,7 +1001,8 @@ def p42():
             if pl.presentation_current(out, final):
                 return "done"
             videos.append(len(list(final.glob("*.jpg"))))
-            (out / "Presentación.mp4").write_bytes(b"MP4 nuevo")
+            for k in ("horizontal", "vertical"):
+                (out / f"Presentación {k}.mp4").write_bytes(b"MP4 nuevo")
         f._set(pl.Pipeline, "_present", present)
         p = td._correr(ev, 3)
     assert "failed_step" not in p.summary, p.summary
@@ -1243,7 +1248,10 @@ def p51():
         td.write(ev / core.FINAL_SUBFOLDER / f"{i + 1}.jpg", JPG_IMAGEN)
     assert pl.resume_step(ev) == (core.STEP_PRES, "la presentación")
     assert pl.resume_step(ev, off={core.STEP_PRES}) == (3, "")                    # CineSlide desactivado: ya está
-    td.write(ev / pl.PRES_DIR / "Presentación.mp4", b"MP4")
+    td.write(ev / pl.PRES_DIR / "Presentación.mp4", b"MP4")          # un solo video (de antes): faltan los dos
+    assert pl.resume_step(ev) == (core.STEP_PRES, "la presentación")
+    for k in ("horizontal", "vertical"):
+        td.write(ev / pl.PRES_DIR / f"Presentación {k}.mp4", b"MP4")
     assert pl.resume_step(ev) == (3, "")                             # terminado: revisar desde Imagen
     assert pl.resume_step(td.fresh("p51_vacio")) is None
 
@@ -1325,7 +1333,8 @@ def p54():
         viejas[f"f{i}"] = td.write(ev / "3 Fotos finales" / f"{i + 1}.jpg", JPG_IMAGEN)
     viejas["v"] = td.write(ev / "4 Presentación de fotos" / "Presentación.mp4", b"MP4")
     inodos = {k: os.stat(q).st_ino for k, q in viejas.items()}
-    assert pl.resume_step(ev) == (3, ""), pl.resume_step(ev)         # lo ve terminado… y ya está reordenado
+    # un solo video (de antes del 26-nov-2026): falta la presentación en los dos formatos… y ya está reordenado
+    assert pl.resume_step(ev) == (core.STEP_PRES, "la presentación"), pl.resume_step(ev)
     nombres = sorted(x.name for x in ev.iterdir() if not x.name.startswith("."))
     assert nombres == ["1 Original", "2 DNGs", "3 Imagen AI", "4 Fotos finales", "6 Presentación de fotos"], nombres
     assert not (dngs / "Imagen AI").exists()
@@ -1595,7 +1604,8 @@ def p57():
     lejos = [a1, _foto("A2.NEF", 9.0, 0.20, caras=[_cara(ojos=(0.06, 0.08))])]       # 9 s después: otra toma
     assert S.decide(lejos) == {"A2.NEF": solo}
     dos = [_foto("B1.NEF", 0, caras=[_cara(ojos=(0.06, 0.07))]), _foto("B2.NEF", 0.3, 0.20, caras=[_cara(ojos=(0.05, 0.08))])]
-    assert S.decide(dos) == {"B1.NEF": solo, "B2.NEF": solo}                          # las dos con los ojos cerrados
+    d = S.decide(dos)                     # las dos con los ojos cerrados: 26-nov-2026, ningún momento sin foto → una se queda
+    assert len(d) == 1 and set(d.values()) == {solo}, d
     medio = [a1, _foto("A2.NEF", 9.0, 0.20, caras=[_cara(ojos=(0.13, 0.15))])]       # a medio cerrar / sonriendo: no
     assert S.decide(medio) == {}
     beso = [a1, _foto("K1.NEF", 9.0, 0.40, caras=[_cara(x=0.40, ojos=(0.05, 0.06)), _cara(x=0.47, ojos=(0.06, 0.05))])]
@@ -1617,8 +1627,9 @@ def p57():
     fallida = [_foto("F1.NEF", 0, caras=[], personas=4, estetica=-0.5)]              # baile movido, sin ninguna cara
     assert "fallida" in S.decide(fallida).get("F1.NEF", ""), S.decide(fallida)
     assert S.decide([_foto("F2.NEF", 0, caras=[_cara()], estetica=-0.5)]) == {}      # con una cara: la nota sola no basta
-    quemada = [_foto("Q1.NEF", 0, caras=[_cara(lum=250)])]
+    quemada = [_foto("Q0.NEF", 0, caras=[_cara()]), _foto("Q1.NEF", 2, 0.5, caras=[_cara(lum=250)])]
     assert "quemadas" in S.decide(quemada).get("Q1.NEF", "")
+    assert S.decide(quemada[1:]) == {}                     # sola en su momento: no se queda el momento sin foto
     muchas = [_foto(f"M{i}.NEF", i * 0.4, 0.2 if i else None, caras=[_cara(ojos=(0.05, 0.05) if i % 2 else (0.3, 0.3))])
               for i in range(10)] + negra
     d = S.decide(muchas)                                                              # 5 de 11: no cuadra → solo lo seguro
@@ -1761,9 +1772,8 @@ def p62():
     g = [toma("G1.NEF", 0.0, caras=_grupo()),
          toma("G2.NEF", 1.0, [0.12], caras=_grupo(cerrado=2, calidad=0.6)),        # la 3.ª persona parpadea
          toma("G3.NEF", 2.2, [0.13, 0.14], caras=_grupo(dx=0.02, calidad=0.55))]   # la cámara se movió un poco
-    d = S.decide(g)
-    assert d == {"G1.NEF": "repetida: se queda G3 (la mejor de las 3)",
-                 "G2.NEF": "repetida, con ojos cerrados: se queda G3 (la mejor de las 3)"}, d
+    d = S.decide(g)                      # 26-nov-2026: de 3 o más se quedan las 2 mejores (una de respaldo)
+    assert d == {"G2.NEF": "repetida, con ojos cerrados: se quedan G3 y G1 (las 2 mejores de las 3: una de respaldo)"}, d
     otro = [toma("H1.NEF", 0, caras=_grupo()), toma("H2.NEF", 0.5, [0.30], caras=_grupo())]
     assert S.decide(otro) == {}, "otro gesto o encuadre (parecido 0,30): no es repetida"
     hdr = [toma("K1.NEF", 0, ev=8.0, caras=[], personas=0, escena=[["building", 0.9]]),
@@ -1902,6 +1912,331 @@ def p69():
     assert iw._sidebar(s, [caja("Proyectos", 790, 540)])["y"] == 540                     # leído: se usa tal cual
     assert iw._sidebar(s, [caja("Proyectos activos (13)", 880, 700, 230)]) is None       # el título de la lista no
     assert iw._sidebar(s, [caja("Perfiles de", 772, 417, 80)]) is None                   # sin el de abajo, no adivina
+    # 25-nov-2026: tampoco leyó «Social», solo «Spotlight» (lo leído de verdad en la captura del fallo, ventana 1600×940)
+    s.rect = (920, 250, 1600, 940)
+    leido = [caja("Inicio", 967, 374), caja("Perfiles de", 951, 468, 64), caja("Spotlight", 956, 685, 54),
+             caja("Tienda de", 952, 771, 60), caja("perfiles", 960, 786, 44),
+             caja("Proyectos activos (14)", 1071, 703, 195), caja("Crear proyecto", 1148, 907, 110)]
+    b = iw._sidebar(s, leido)
+    assert b is not None and 250 + 290 < b["y"] + b["h"] / 2 < 250 + 350 and 940 < b["x"] < 1000, b   # su botón: 277-357
+
+
+@prueba("Imagen (Windows), nombre del proyecto: Imagen recoloca el diálogo y PISA lo escrito con su propuesta «2 DNGs "
+        "0517» (25-nov-2026, paso 4 parado cuatro veces): RawFlow vuelve a buscar la casilla, lo escribe otra vez y "
+        "solo lo da por bueno si aguanta; y el nombre repetido es «… n2» (el OCR de Windows no lee «#2»)", solo_win="Imagen de Windows")
+def p70():
+    import tempfile
+    from types import SimpleNamespace
+    from rawflow import imagen_win as iw
+    caja = lambda t, x, y, w=120, h=15: {"t": t, "x": x, "y": y, "w": w, "h": h}
+    nombre = "25 nov 2026 n2"
+    hecho, lecturas = [], [0]
+    s = SimpleNamespace(rect=(920, 250, 1600, 940), should_stop=lambda: False,
+                        keys=lambda c: hecho.append(("teclas", c)), click=lambda x, y: hecho.append(("clic suelto", x, y)),
+                        click_box=lambda b, after=0: hecho.append(("clic en", b["t"], b["y"])),
+                        type=lambda t: (hecho.append(("escribe", t)), lecturas.__setitem__(0, 0))[0])
+    s.find = lambda text, exact=False, boxes=None, region=None: iw.Screen.find(s, text, exact, boxes, region)
+
+    def ocr(scale=1):                                   # lo visto en vivo: (rótulo 660, casilla 695) → (611, 646)
+        veces = sum(1 for a in hecho if a[0] == "escribe")
+        lecturas[0] += 1
+        if veces == 0:
+            return [caja("Total de fotos: 585", 1146, 598), caja("Nombra tu proyecto", 1146, 660, 144),
+                    caja("Por ejennplc: acdas 2024, Tonn", 1162, 695, 230), caja("Elige un tipo de fotografía", 1147, 786, 215)]
+        if veces == 1 and lecturas[0] == 1:             # recién escrito: se lee… y luego Imagen lo pisa y sube todo
+            return [caja("Nombra tu proyecto", 1146, 660, 144), caja(nombre, 1162, 695)]
+        dentro = "DNGs 0517" if veces == 1 else nombre
+        return [caja("Total de fotos: 585", 1146, 549), caja("Nombra tu proyecto", 1146, 611, 144),
+                caja(dentro, 1175, 646), caja("Social", 965, 670, 40), caja("Elige un tipo de fotografía", 1147, 737, 215)]
+    s.ocr = ocr
+    espera = iw.NAME_STAY
+    try:
+        iw.NAME_STAY = 0.0
+        iw._type_name(s, caja("Nombra tu proyecto", 1146, 660, 144), Path("C:/eventos/25 nov 2026/2 DNGs"), nombre)
+    finally:
+        iw.NAME_STAY = espera
+    assert hecho == [("clic en", "Por ejennplc: acdas 2024, Tonn", 695), ("teclas", "ctrl+a"), ("escribe", nombre),
+                     ("clic en", "DNGs 0517", 646), ("teclas", "ctrl+a"), ("escribe", nombre)], hecho
+    hist = iw.HIST
+    try:
+        iw.HIST = Path(tempfile.gettempdir()) / "rawflow-prueba-no-existe.txt"
+        assert iw.free_name("25 nov 2026", ["Proyectos", "25 nov 2026"]) == "25 nov 2026 n2"
+        assert iw.free_name("25 nov 2026", ["25 nov 2026", "25 nov 2026 #2", "25 nov 2026 n3"]) == "25 nov 2026 n2"
+        assert iw.free_name("25 nov 2026", ["25 nov 2026", "25 nov 2026 n2"]) == "25 nov 2026 n3"
+        assert iw.free_name("25 nov 2026 2", ["25 nov 2026", "25 nov 2026 n2"]) == "25 nov 2026 2"   # otro evento
+    finally:
+        iw.HIST = hist
+
+@prueba("Imagen (Windows) sin esperas muertas (25-nov-2026, 20 min parado): minimizada sigue contando como ventana "
+        "(vuelve maximizada); si «Descargar ediciones» sigue en pantalla a los 20 s sin ningún DNG editado, se pulsa "
+        "otra vez; y «Revisar Ediciones» se pulsa por su sitio si el OCR no lee el botón rojo de un proyecto listo", solo_win="Imagen de Windows")
+def p71():
+    from types import SimpleNamespace
+    from rawflow import imagen_win as iw
+    caja = lambda t, x, y, w=120, h=14: {"t": t, "x": x, "y": y, "w": w, "h": h}
+    guardado = (iw.ws.windows, iw.ws.foreground, iw.ws.activate, iw.download_result, iw.core.without_imagen,
+                iw.RETAP_AFTER, iw.PROMPT_WAIT, iw._find_row, iw._close_uploads)
+    try:
+        # 1) minimizada (199×34): es la ventana principal y front() la trae maximizada a la pantalla principal
+        mini = {"hwnd": 7, "title": "Imagen AI", "rect": (-32000, -32000, 199, 34), "min": True, "exe": "ImagenAI.exe"}
+        iw.ws.windows = lambda title_part="", exe="": [mini, dict(mini, hwnd=8, title="")]
+        iw.ws.foreground = lambda: {"hwnd": 1, "title": "Claude", "exe": "claude.exe"}
+        traidas = []
+        iw.ws.activate = lambda hwnd, maximize=True, primary=False: traidas.append((hwnd, maximize, primary)) or True
+        s = iw.Screen(lambda m: None)
+        assert s.main_window()["hwnd"] == 7 and s.window() is None
+        s.front(force=True)
+        assert traidas == [(7, True, True)], traidas
+
+        # 2) el clic en «Descargar ediciones» no entró: a los RETAP_AFTER s se pulsa otra vez (el botón, no el título)
+        hecho, t0 = [], time.time()
+        iw.RETAP_AFTER, iw.PROMPT_WAIT = 0.0, 0.0
+        iw.core.without_imagen = lambda dngs: list(dngs)                      # ningún DNG lleva ediciones aún
+        iw.download_result = lambda mark, d: ("SUCCESS", 2, 2, "") if hecho else None
+        f = SimpleNamespace(rect=(0, 0, 3440, 1440), should_stop=lambda: False, log=lambda m: None,
+                            click_box=lambda b, after=0: hecho.append((b["t"], b["y"])))
+        # (lo leído de verdad: el botón rojo sale A TROZOS y lo único entero es el TÍTULO del diálogo, que se llama
+        # igual; RawFlow pulsaba el título y la descarga nunca arrancaba)
+        dialogo = [caja("Descargar ediciones", 1354, 578, 200, 18), caja("¿Tus fotos siguen aquí?", 1353, 630, 170),
+                   caja("nov 2026\\2 DNGS", 1557, 680, 129), caja("Explorar", 2016, 681, 61, 12),
+                   caja("9 Descargar ediciones de Imagen reemplaza las ediciones existentes.", 1364, 757, 500),
+                   caja("r Ediciones en Ad", 2212, 818, 200), caja("Desca", 1910, 847, 45, 12),
+                   caja("ar ediciones", 1971, 846, 90, 12), caja("r Ediciones en Ad", 2212, 1070, 200)]
+        f.ocr = lambda scale=1: list(dialogo)
+        f.find = lambda text, exact=False, boxes=None, region=None: iw.Screen.find(f, text, exact, boxes, region)
+        b = iw._download_button(f, dialogo)
+        assert 1883 < b["x"] + b["w"] / 2 < 2087 and 835 < b["y"] + b["h"] / 2 < 869, b       # dentro del botón rojo
+        b = iw._download_button(f, [q for q in dialogo if q["t"] not in ("Desca", "ar ediciones")])   # ni a trozos
+        assert 1883 < b["x"] + b["w"] / 2 < 2087 and 835 < b["y"] + b["h"] / 2 < 869, b       # …por su sitio
+        assert iw._download_button(f, [caja("Descargar ediciones", 1354, 578)]) is None        # sin diálogo: nada
+        res = iw._await_download(f, Path("C:/e/2 DNGs"), (Path("x.log"), 0), [Path("a.dng"), Path("b.dng")])
+        assert res[0] == "SUCCESS" and hecho == [("Descargar ediciones", 847)] and time.time() - t0 < 10, (res, hecho)
+
+        # 3) proyecto «Lista para reseña» y el botón rojo sin leer: se pulsa en la columna «Siguiente paso», en su fila
+        lista = [caja("Nombre del proyecto", 228, 160, 160), caja("Perfil", 805, 159, 40), caja("Estado", 1379, 160, 50),
+                 caja("Fotos", 1997, 160, 40), caja("Seguiente paso", 3126, 160, 110),
+                 caja("25 nov 2026 n2", 228, 222), caja("• Lista para reseña", 1378, 221, 140), caja("585", 1996, 222, 30),
+                 caja("2 DNGS", 228, 307), caja("• Ajustar perfil", 1378, 306), caja("Entrenar Perfil", 3182, 308, 106)]
+        iw._close_uploads = lambda s_: None
+        iw._find_row = lambda s_, project, tries=4: (lista[5], lista)
+        clics = []
+
+        class Abierto(Exception):
+            pass
+
+        def espera(*a, **k):
+            raise Abierto()
+        g = SimpleNamespace(rect=(-9, -9, 3458, 1458), log=lambda m: None, wait=espera,
+                            click_box=lambda b, after=0: clics.append((round(b["x"] + b["w"] / 2), round(b["y"] + b["h"] / 2))))
+        g.inside = lambda b, r: iw.Screen.inside(g, b, r)
+        try:
+            iw._open_download_dialog(g, Path("C:/e/25 nov 2026/2 DNGs"), "25 nov 2026 n2")
+        except Abierto:
+            pass
+        assert len(clics) == 1 and 3132 < clics[0][0] < 3352 and 215 < clics[0][1] < 245, clics   # dentro del botón
+    finally:
+        (iw.ws.windows, iw.ws.foreground, iw.ws.activate, iw.download_result, iw.core.without_imagen,
+         iw.RETAP_AFTER, iw.PROMPT_WAIT, iw._find_row, iw._close_uploads) = guardado
+
+
+@prueba("Bridge (Windows), botón azul «Exportar»: el OCR lo lee «capono» o «Expottor» (25-nov-2026, evento parado con "
+        "las ediciones ya bajadas): vale un parecido y, si no, se pulsa por su sitio, justo encima de «Cancelar»", solo_win="Bridge de Windows")
+def p72():
+    from types import SimpleNamespace
+    from rawflow import imagen_win as iw
+    caja = lambda t, x, y, w, h: {"t": t, "x": x, "y": y, "w": w, "h": h}
+    s = SimpleNamespace(rect=(1264, 351, 911, 737))               # el diálogo; el botón real: x 2025-2140, y 428-458
+    s.inside = lambda b, r: iw.Screen.inside(s, b, r)
+    dentro = lambda b: 2025 < b["x"] + b["w"] / 2 < 2140 and 428 < b["y"] + b["h"] / 2 < 458      # noqa: E731
+    titulo, otro = caja("Exportar", 1290, 356, 55, 15), caja("Exportación", 1551, 456, 70, 14)
+    s.ocr = lambda scale=1: [titulo, otro, caja("capono", 2032, 434, 114, 33), caja("Cancelar", 2059, 488, 55, 11)]
+    assert dentro(iw._bridge_export_button(s, tries=1))                                    # por su sitio
+    s.ocr = lambda scale=1: [titulo, otro, caja("Expottar", 2060, 437, 54, 12), caja("Cancelar", 2059, 488, 55, 11)]
+    assert dentro(iw._bridge_export_button(s, tries=1))                                    # por parecido
+    s.ocr = lambda scale=1: [titulo, otro]
+    assert iw._bridge_export_button(s, tries=1) is None                                    # el título nunca vale
+
+
+@prueba("Falta el preajuste de Retouch4me o de Luminar (25-nov-2026: «FIN OK» con 0 finales / sin Luminar): el evento "
+        "se para con el aviso; si el programa no está instalado, el paso se sigue omitiendo")
+def p73():
+    from rawflow import pipeline as pl
+    for why in ("no encuentro el preajuste «CINEMA» en Arams", "hay plugins de máscara instalados (Skin Mask / Eye "
+                "Brilliance)", "no encuentro el preajuste «CINEMA AJUSTE» en Mis preajustes de Luminar"):
+        assert not pl.not_installed(why), why
+    for why in ("no encuentro Retouch4me Arams", "no encuentro Luminar Neo", "desactivado en pruebas", "solo en Windows"):
+        assert pl.not_installed(why), why
+    from types import SimpleNamespace                                 # _with_retries sin la ventana ni los hilos
+    p = SimpleNamespace(_stop=False, RETRIES={4: 3}, retried=set(), detail=SimpleNamespace(emit=lambda *a: None),
+                        _reset_app=lambda i: (_ for _ in ()).throw(AssertionError("no debe reintentar")),
+                        _salvage=lambda i, e: (_ for _ in ()).throw(AssertionError("no debe apartar")))
+    llamadas = []
+
+    def paso():
+        llamadas.append(1)
+        raise pl.SetupMissing("Retouch4me: no encuentro el preajuste «CINEMA» en Arams.")
+    try:
+        pl.Pipeline._with_retries(p, 4, paso)
+        raise AssertionError("debía parar el evento")
+    except pl.SetupMissing:
+        pass
+    assert len(llamadas) == 1                                         # sin reintentos ni apartar fotos
+
+
+@prueba("Selección IA en Windows, tomas al monte (25-nov-2026: 8 pasaron como buenas): toda la foto la misma textura "
+        "de hierba y sin nadie → se aparta; el jardín con árboles, los caballos y las fotos con caras se quedan")
+def p74():
+    import numpy as np
+    from rawflow import seleccion as sel, seleccion_win as sw
+    rng = np.random.default_rng(1)
+    hierba = np.clip(np.dstack([rng.normal(40, 15, (400, 600)), rng.normal(130, 25, (400, 600)),
+                                rng.normal(60, 15, (400, 600))]), 0, 255).astype(np.uint8)       # BGR verde con textura
+    g = sw.ground_stats(hierba)
+    assert g["igual"] >= sel.GROUND_SAME and g["verde"] >= sel.GROUND_GREEN, g
+    jardin = hierba.copy()
+    jardin[:200] = (200, 170, 120)                                                    # media foto de cielo/árboles
+    assert sw.ground_stats(jardin)["igual"] < sel.GROUND_SAME
+    base = {"lum": 70, "negro": 1, "quemado": 0, "desv": 30, "nit": 500, "caras": [], "personas": 0}
+    assert "monte" in sel._accidental({**base, **g})
+    assert not sel._accidental({**base, **sw.ground_stats(jardin)})
+    assert not sel._accidental({**base, **g, "caras": [{"x": 0.4}], "personas": 1})
+    assert not sel._accidental({**base, "igual": 0.9, "verde": 0.0})                 # tela con textura (no hierba)
+    assert sel._accidental({**base, "igual": 0.9, "verde": 0.0, "desv": 12})          # pared lisa
+    assert sel.kind(sel._accidental({**base, **g})) == "piso"
+
+
+@prueba("Presentación (26-nov-2026): siempre 3 s por foto y los dos videos, «Presentación horizontal.mp4» y "
+        "«Presentación vertical.mp4», aunque en CineSlide se dejara otra cosa")
+def p75():
+    import re
+    from rawflow import pipeline as pl
+    src = (Path(pl.__file__).with_name("cineslide_run.py")).read_text(encoding="utf-8")
+    assert re.search(r"SEGUNDOS_POR_FOTO = 3\.0", src) and '"t_segundos_por_foto"' in src and "Los dos" in src
+    assert pl.pres_name(Path("x/Presentación_horizontal.mp4"), 2) == "Presentación horizontal.mp4"
+    assert pl.pres_name(Path("x/Presentación_vertical.mp4"), 2) == "Presentación vertical.mp4"
+    assert pl.pres_name(Path("x/Presentación_vertical 2026-11-26 08.02.mp4"), 2) == "Presentación vertical.mp4"
+    ev = td.fresh("p75")
+    out, final = ev / pl.PRES_DIR, ev / pl.FINAL_DIR
+    td.write(final / "1.jpg", JPG_IMAGEN)
+    t = time.time() + 120
+    v = td.write(out / "Presentación horizontal.mp4", b"MP4")
+    os.utime(v, (t, t))
+    assert not pl.presentation_current(out, final)                     # falta la vertical
+    v = td.write(out / "Presentación vertical.mp4", b"MP4")
+    os.utime(v, (t, t))
+    assert pl.presentation_current(out, final)
+
+
+@prueba("Selección IA en Windows, caras borrosas (26-nov-2026: «dejaste pasar fotos borrosas»): la nitidez de la cara "
+        "se mide igual sea grande o pequeña, clara u oscura; la borrosa se aparta y la nítida (aunque oscura) se queda")
+def p76():
+    import cv2
+    import numpy as np
+    from rawflow import seleccion as sel, seleccion_win as sw
+    rng = np.random.default_rng(3)
+    base = rng.integers(0, 255, (40, 40), dtype=np.uint8)
+    nitida = cv2.cvtColor(cv2.resize(base, (300, 300), interpolation=cv2.INTER_NEAREST), cv2.COLOR_GRAY2BGR)
+    oscura = (nitida * 0.25).astype(np.uint8)                          # poca luz y poco contraste: sigue nítida
+    pequena = cv2.resize(nitida, (80, 80), interpolation=cv2.INTER_AREA)
+    borrosa = cv2.GaussianBlur(nitida, (0, 0), 25)                     # ≈ 5 px de desenfoque en la cara a 64 px
+    vals = {k: sw.face_sharpness(v) for k, v in (("nitida", nitida), ("oscura", oscura), ("pequena", pequena),
+                                                ("borrosa", borrosa))}
+    assert min(vals["nitida"], vals["oscura"], vals["pequena"]) > sel.BLUR_NORM > vals["borrosa"], vals
+    cara = {"x": 0.4, "y": 0.3, "w": 0.1, "h": 0.1, "px": 150, "ojoI": 0.3, "ojoD": 0.3}
+    fila = {"lum": 120, "quemado": 0, "caras": [{**cara, "nitn": vals["borrosa"]}]}
+    assert "movida" in sel._defect(fila)
+    fila["caras"].append({**cara, "x": 0.6, "nitn": vals["nitida"]})   # otra cara nítida: la foto vale
+    assert "movida" not in sel._defect(fila)
+    assert "movida" not in sel._defect({"lum": 120, "quemado": 0, "caras": [cara]})   # Mac: sin «nitn», no se juzga
+
+
+@prueba("Luminar (26-nov-2026: el paso 6 no se hacía): el preajuste del usuario se llama «CINEMA», no «CINEMA AJUSTE»: "
+        "vale cualquiera de los dos, y en la lista «CINEMA» no se confunde con «Cinematic»", solo_win="Luminar de Windows")
+def p77():
+    import json as _json
+    from rawflow import luminar_win as lw
+    guardado = (lw.DATA, lw.PRESET)
+    base = td.fresh("p77")
+    try:
+        lw.DATA = base
+        users = base / "Data" / "Presets" / "Users"
+        assert lw.find_preset() is None
+        td.write(users / "a.lnp" / "template.lmps", _json.dumps({"name": "Cinematic"}).encode())
+        assert lw.find_preset() is None                                   # otro que empieza igual: no
+        td.write(users / "b.lnp" / "template.lmps", _json.dumps({"name": "CINEMA"}).encode())
+        assert lw.find_preset() == "CINEMA" and lw.preset_exists()
+        td.write(users / "c.lnp" / "template.lmps", _json.dumps({"name": "CINEMA AJUSTE"}).encode())
+        assert lw.find_preset() == "CINEMA AJUSTE"                        # si están los dos, el de siempre
+    finally:
+        lw.DATA, lw.PRESET = guardado
+    assert lw._is_item("CINEMA", "CINEMA") and lw._is_item("Cinema", "CINEMA")
+    assert not lw._is_item("Cinematic", "CINEMA") and not lw._is_item("CINEMA AJUSTE", "CINEMA")
+    assert lw._is_item("CINEMA AJUS…", "CINEMA AJUSTE")
+
+
+@prueba("Aviso «SACA LA USB» (26-nov-2026: «tiene que estar hasta que yo retire la USB… en grande»): grande, en el "
+        "centro, y no se va solo mientras la USB siga conectada (ni aunque no se sepa cuál es)", solo_win="aviso de la USB de Windows")
+def p78():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from rawflow import core, overlays as ov
+    QApplication.instance() or QApplication([])
+    assert core.drive_present("wait:")                                    # sin saber cuál: sigue hasta cerrarlo
+    t = ov.EjectToast([{"name": "USB (E:)", "disk": "wait:"}])
+    t.place()
+    g = ov.QGuiApplication.primaryScreen().geometry()
+    assert t.width() >= min(560, g.width()) and t.height() >= 260, (t.width(), t.height())   # grande
+    assert abs((t.x() + t.width() / 2) - g.center().x()) <= 2                                 # centrado
+    t._check()
+    assert not t.done_t and t.watching()                                  # sigue: la USB sigue puesta
+    # USB conocida: expulsada pero conectada (con o sin el «problema 47» de Windows) → sigue; desenchufada → se va
+    puesta = {"v": (True, 0)}
+    guardado = core.win_devnode
+    try:
+        core.win_devnode = lambda dev: puesta["v"]
+        u = ov.EjectToast([{"name": "USB (E:)", "disk": "win:USBSTOR\\X"}])
+        for estado in ((True, 0), (True, 47), (True, 21)):
+            puesta["v"] = estado
+            u._check()
+            assert not u.done_t, estado
+        puesta["v"] = (False, 0)
+        u._check()
+        assert u.done_t                                                   # «USB RETIRADA»
+    finally:
+        core.win_devnode = guardado
+    w = ov.EjectToast([{"name": "USB (E:)", "disk": "wait:"}])
+    w.popup()
+    assert w.poll.isActive() or not w.watching() is False                 # Windows: vigila, no se va sola a los 9 s
+    w.close()
+
+
+@prueba("Memorias (26-nov-2026: «más rápido y con animación al encontrar una»): el recorrido da las mismas fotos con "
+        "su tamaño y fecha, sin las carpetas de eventos ni la basura de macOS; la tarjeta anima al llegar y al contar")
+def p79():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")             # (en el servidor de GitHub no hay pantalla)
+    from PySide6.QtWidgets import QApplication
+    from rawflow import widgets as wd
+    QApplication.instance() or QApplication([])
+    raiz = td.fresh("p79")
+    td.write(raiz / "DCIM" / "100MSDCF" / "DSC0001.ARW", b"R" * 10)
+    td.write(raiz / "DCIM" / "100MSDCF" / "._DSC0001.ARW", b"x")
+    td.write(raiz / "DCIM" / "101MSDCF" / "DSC0002.ARW", b"R" * 20)
+    td.write(raiz / "DCIM" / "101MSDCF" / "vacia.ARW", b"")
+    td.write(raiz / "25 nov 2026" / "1 Original" / "DSC9.ARW", b"R")           # evento ya hecho: ni se toca
+    td.write(raiz / "notas.txt", b"t")
+    vistos = []
+    fs = core.scan_drive(str(raiz), lambda v, f: vistos.append((v, f)), skip_events=True)
+    assert sorted(Path(f.path).name for f in fs) == ["DSC0001.ARW", "DSC0002.ARW"], fs
+    assert {f.size for f in fs} == {10, 20} and all(f.mtime > 0 for f in fs)
+    assert vistos and vistos[-1][1] == 2
+    c = wd.DriveCard(core.Drive(str(raiz), "USB", "exFAT", 100, 50, True))
+    assert c._animating()                                                      # ondas al aparecer
+    c._born -= 10
+    c.set_done(2, 30, ["ARW"])
+    assert c._done_t and c._animating()                                        # el número cuenta
+    c._done_t -= 10
+    c._tick()
+    assert not c._timer.isActive()                                             # y luego, quieta (sin gastar)
 
 
 def main() -> int:

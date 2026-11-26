@@ -107,6 +107,7 @@ class UpdateWorker(QThread):
 
 class ScanWorker(QThread):
     progress = Signal(str, int, int)
+    counted = Signal(str, list)         # recorrida la memoria: ya se sabe cuántas fotos (antes de mirar horas y gente)
     finished_scan = Signal(str, list)
 
     def __init__(self, key: str, parent=None, paths=None):
@@ -133,6 +134,8 @@ class ScanWorker(QThread):
             # skip_events: en un disco externo de trabajo (que también sale como «memoria») jamás se entra en las
             # carpetas de eventos ya hechos: sus RAW y sus DNG se movían al evento nuevo, vaciando los anteriores
             files = core.scan_drive(self.key, prog, lambda: self._stop, skip_events=True)
+        if not self._stop:                        # la tarjeta ya enseña cuántas hay (lo de los eventos llega después)
+            self.counted.emit(self.key, files)
         # la hora de cada TOMA (para ver si la memoria trae varios eventos): aquí, en segundo plano, y no al pintar el
         # resumen. (4.26) Varias a la vez: 1.300 NEF 5,8 s → 0,6 s (el disco atiende varias lecturas pequeñas juntas)
         from concurrent.futures.thread import ThreadPoolExecutor
@@ -622,9 +625,11 @@ class MainWindow(QMainWindow):
         self.mini = MiniPanel()
         self.curtain = Curtain()
         self.mirrored = False
-        from .runscreen import RunScreen
+        from .runscreen import RunScreen, StopButton
         from .inputlock import InputLock
         self.runscreen = RunScreen(STEPS)
+        self.stopbtn = StopButton()                 # «Parar», siempre a mano durante el evento
+        self.stopbtn.stop.connect(self._stop_clicked)
         self.inputlock = InputLock(self)
         self.inputlock.cancel.connect(self._lock_cancel)
         self.inputlock.state.connect(self._lock_state)
@@ -1267,6 +1272,7 @@ class MainWindow(QMainWindow):
         anim.slide_in(card)                        # la tarjeta entra deslizándose y aparece
         w = ScanWorker(d.key, self, paths=self.dropped.get(d.key))
         w.progress.connect(self._scan_progress)
+        w.counted.connect(self._scan_counted)
         w.finished_scan.connect(self._scan_done)
         w.finished.connect(w.deleteLater)
         self.scanners[d.key] = w
@@ -1296,6 +1302,12 @@ class MainWindow(QMainWindow):
     def _scan_progress(self, key, visited, found):
         if key in self.cards:
             self.cards[key].set_scanning(visited, found)
+
+    def _scan_counted(self, key, files):
+        """Ya se sabe cuántas fotos trae: la tarjeta lo enseña (con su animación) sin esperar a lo de los eventos."""
+        if key in self.cards and key not in self.results:
+            res = core.ScanResult(files)
+            self.cards[key].set_done(len(files), res.total_bytes, [f for f, _ in res.by_format().most_common()])
 
     def _scan_done(self, key, files):
         self.scanners.pop(key, None)
@@ -1959,7 +1971,8 @@ class MainWindow(QMainWindow):
         # pantalla completa de proceso (el ratón y el teclado ya NO se bloquean: solo se escucha Esc ×3 para cancelar)
         self.runscreen.target = self.screen()                  # la pantalla de proceso, donde está la ventana
         self.runscreen.open(event.name, f"{self.run_n:,} fotos  ·  {event}", start)
-        for w in (self.runscreen, self.mini, self.curtain):     # Windows: no tapan lo que RawFlow lee por debajo
+        self.stopbtn.open(self.runscreen.target)
+        for w in (self.runscreen, self.mini, self.curtain, self.stopbtn):     # Windows: no tapan lo que RawFlow lee por debajo
             hide_from_capture(w)
         for k in self.steps_off:
             if k >= start:
@@ -2195,9 +2208,18 @@ class MainWindow(QMainWindow):
         if self.pipe:
             self.pipe.stop()
 
+    @Slot()
+    def _stop_clicked(self):
+        """Botón «Parar» de la pantalla de proceso (dos clics): cancelar, como Esc ×3."""
+        self.runscreen.esc = False
+        self.runscreen.set_texts(status="Cancelando…", detail="Botón «Parar» pulsado")
+        if self.pipe:
+            self.pipe.stop()
+
     def _on_finished(self, event: str, err: str):
         summary = self.pipe.summary if self.pipe else {}
         self.pipe = None
+        self.stopbtn.hide()
         self.clock.stop()
         self.inputlock.release()
         self.runscreen.esc = False
@@ -2368,6 +2390,10 @@ class MainWindow(QMainWindow):
         """Salir LIMPIO: se para todo lo que trabaja en segundo plano y se espera a cada hilo lo que necesita (un
         «diskutil» puede tardar 5 s). Si un hilo de Qt siguiera vivo al destruir la ventana, Qt aborta y macOS
         enseña «se cerró inesperadamente»: por eso main() sale sin destruir nada si aún queda alguno."""
+        try:
+            self.stopbtn.hide()
+        except (AttributeError, RuntimeError):
+            pass
         for t in (getattr(self, "clock", None), getattr(self, "power_timer", None),
                   getattr(self, "ready_timer", None)):
             try:

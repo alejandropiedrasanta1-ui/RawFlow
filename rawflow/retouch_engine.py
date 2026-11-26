@@ -254,7 +254,10 @@ def retouch(src: Path, dest: Path, log, should_stop=lambda: False, progress=lamb
     WORK.mkdir(parents=True, exist_ok=True)
     stop_file.unlink(missing_ok=True)
     items = [{"in": str(p), "tmp": str(dest / (TMP_PREFIX + p.name)), "out": str(dest / p.name)} for p in todo]
+    LAST_DECISION[0] = ""
     k = processes(len(items))
+    if LAST_DECISION[0]:
+        log(LAST_DECISION[0])
     aviso = gpu_warning() if os.environ.get("RAWFLOW_SIN_APPS") != "1" else ""
     if aviso:
         log("⚠ " + aviso)
@@ -458,10 +461,30 @@ def processes(n_fotos: int) -> int:
         n = 0
     if n <= 0:
         n = 1
-        free = _gpu_free_mb() if sys.platform == "win32" else None
-        if free is not None:
-            n = max(1, min(MAX_PROCS, int((free - 1500) // VRAM_PER_PROC)))
+        if sys.platform == "win32":
+            # 25-nov-2026 (revisión): era UNA lectura de nvidia-smi; si tardaba o la tarjeta aún soltaba memoria de
+            # las apps recién cerradas, iba con 1 motor TODO el paso (≈23 s/foto en vez de ≈16,5) sin decir nada. Se
+            # reintenta si no responde y, si da menos de 3, se vuelve a mirar unos segundos (vale la ÚLTIMA lectura).
+            free = None
+            for _ in range(3):
+                free = _gpu_free_mb()
+                if free is not None:
+                    break
+                time.sleep(2)
+            t0 = time.time()
+            want = min(MAX_PROCS, n_fotos)               # (revisión 26-nov-2026: con 1-2 fotos esperaba 20 s para nada)
+            while free is not None and int((free - 1500) // VRAM_PER_PROC) < want and time.time() - t0 < 20:
+                time.sleep(4)
+                free = _gpu_free_mb() or free
+            if free is not None:
+                n = max(1, min(MAX_PROCS, int((free - 1500) // VRAM_PER_PROC)))
+            LAST_DECISION[0] = (f"Retouch4me: {min(n, n_fotos)} motor{'es' if min(n, n_fotos) > 1 else ''} a la vez · "
+                                + (f"{free / 1024:.1f} GB libres en la tarjeta" if free is not None
+                                   else "no pude leer la tarjeta gráfica"))
     return max(1, min(n, n_fotos))
+
+
+LAST_DECISION = [""]          # cómo se eligió el nº de motores (para el registro)
 
 
 MAX_PROCS = 3                 # 25-nov-2026, sin otras apps en la tarjeta: 3 → 17,5 s/foto, 4 → 17,4 s/foto y 15,3 GB de

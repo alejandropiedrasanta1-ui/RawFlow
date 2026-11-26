@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import sys
 import time
 
 from PySide6.QtCore import QEasingCurve, QRectF, Qt, QTimer, QVariantAnimation
@@ -38,7 +39,9 @@ class EjectToast(QWidget):
     No recibe clics (RawFlow sigue manejando las apps de debajo). Al acabar el evento, un clic también lo cierra, por
     si algún lector no avisara al sacar la tarjeta."""
 
-    CYCLE, MOVE = 3.2, 1.6          # s: la tarjeta sale en 1,6 s y espera 1,6 s antes de repetir
+    CYCLE, MOVE = 2.4, 1.2          # s: la USB sale del puerto en 1,2 s y vuelve a empezar
+    # 26-nov-2026, el usuario: «tiene que estar hasta que yo retire la USB… que esté en grande avisando saca USB».
+    # Grande, en el centro de la pantalla de proceso, con el borde latiendo; no se va sola hasta que la quitas.
 
     def __init__(self, items):
         super().__init__(None, _flags(True))
@@ -54,8 +57,8 @@ class EjectToast(QWidget):
         self.t0 = time.monotonic()
         self.done_t = 0.0
         self._closing = False
-        self.resize(440, 170)
-        self.tick = QTimer(self, interval=33)          # ~30 fps solo mientras la tarjeta se mueve
+        self.resize(900, 400)                          # (place() lo ajusta a la pantalla)
+        self.tick = QTimer(self, interval=40)          # ~25 fps mientras está en pantalla (es grande: no gastar)
         self.tick.timeout.connect(self._tick)
         self.poll = QTimer(self, interval=600)         # ¿sigue puesta?
         self.poll.timeout.connect(self._check)
@@ -82,16 +85,30 @@ class EjectToast(QWidget):
         self.setWindowOpacity(float(v))
 
     def place(self):
-        """A la izquierda del anillo de la pantalla de proceso (no tapa el nombre del evento ni los pasos)."""
+        """GRANDE y en el centro de la pantalla de proceso (que se vea desde lejos)."""
         global TOAST_RECT
+        import sys
         g = (getattr(self, "target", None) or QGuiApplication.primaryScreen()).geometry()   # la de la pantalla de proceso
-        cx, cy = g.center().x(), g.top() + g.height() * 0.43
-        R = min(g.width(), g.height()) * 0.165
-        x, y = int(cx - R - 48 - self.width()), int(cy - self.height() / 2)
-        if x < g.left() + 16:                          # pantalla estrecha: arriba, en el centro
-            x, y = g.center().x() - self.width() // 2, g.top() + 60
+        if sys.platform == "darwin":
+            # Mac: el OCR de Imagen IGNORA lo que cae dentro de TOAST_RECT (imagen_ui): uno grande en el centro le
+            # taparía los botones toda la vida del aviso (revisión 26-nov-2026). Ahí sigue pequeño y a un lado.
+            w, h = 520, 200
+            self.resize(w, h)
+            cx, cy = g.center().x(), g.top() + g.height() * 0.43
+            R = min(g.width(), g.height()) * 0.165
+            x, y = int(cx - R - 48 - w), int(cy - h / 2)
+            if x < g.left() + 16:
+                x, y = g.center().x() - w // 2, g.top() + 60
+            self.move(x, y)
+            TOAST_RECT = (x, y, w, h)
+            return
+        # Windows: no sale en las capturas (hide_from_capture) ni recibe clics: puede ir grande y en el centro
+        w = int(max(560, min(1100, g.width() * 0.62)))
+        h = int(max(260, min(480, g.height() * 0.40, w * 0.44)))
+        self.resize(w, h)
+        x, y = g.center().x() - w // 2, int(g.top() + g.height() * 0.45 - h / 2)
         self.move(x, y)
-        TOAST_RECT = (x, y, self.width(), self.height())
+        TOAST_RECT = None
 
     def popup(self):
         self.place()
@@ -102,8 +119,9 @@ class EjectToast(QWidget):
             self.tick.start()
         if self.watching():
             self.poll.start()
-        else:                                          # no hay disco que vigilar (lector que solo suelta la tarjeta)
-            QTimer.singleShot(9000, self._out)         # (antes 4,2 s: se iba antes de llegar a sacarla)
+        elif sys.platform == "darwin":                 # Mac sin disco que vigilar: ya no estaba puesta (release_drive
+            QTimer.singleShot(9000, self._out)         # devolvió ""): no hay nada que esperar
+        # (Windows: siempre hay algo que vigilar —«win:» o «wait:»—; se queda hasta que la quitas o la cierras)
 
     def poke(self):
         """Windows avisó de un cambio de dispositivos: mirar ya si la quitaste (sin esperar a la siguiente vuelta)."""
@@ -124,14 +142,12 @@ class EjectToast(QWidget):
                 self.update()
             return
         el = (time.monotonic() - self.t0) % self.CYCLE
-        if el < self.MOVE:                             # sale del lector y se desvanece
+        if el < self.MOVE:                             # sale del puerto y se desvanece
             t, a = el / self.MOVE, 1.0
-        else:                                          # vuelve a aparecer en la ranura y espera
+        else:                                          # vuelve a aparecer enchufada y espera
             t, a = 0.0, min(1.0, (el - self.MOVE) / 0.35)
-        if (t, a) == (self.t, self.a):
-            return                                     # quieta: no se repinta
         self.t, self.a = t, a
-        self.update()
+        self.update()                                  # (el borde late todo el rato)
 
     def _check(self):
         from . import core
@@ -163,77 +179,107 @@ class EjectToast(QWidget):
         self._out()
 
     def paintEvent(self, e):  # noqa: N802
+        import math
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        r = QRectF(self.rect()).adjusted(4, 4, -4, -4)
+        r = QRectF(self.rect()).adjusted(6, 6, -6, -6)
+        H = r.height()
         ok = bool(self.done_t)
-        # (4.26) al retirarla ya no cambia de golpe: el borde pasa a verde, la palomita se dibuja y el texto entra
+        # al retirarla no cambia de golpe: el borde pasa a verde, la palomita se dibuja y el texto entra
         k = 1.0 if (not ok or T.reduce_motion()) else min(1.0, (time.monotonic() - self.done_t) / 0.4)
         ease = QEasingCurve(QEasingCurve.Type.OutCubic).valueForProgress(k)
         if ok:
             a, b = QColor(T.ACCENT), QColor(T.OK)
             edge = QColor.fromRgbF(a.redF() + (b.redF() - a.redF()) * ease, a.greenF() + (b.greenF() - a.greenF()) * ease,
                                    a.blueF() + (b.blueF() - a.blueF()) * ease)
-        else:
+            width = 4.0
+        else:                                          # el borde LATE (se ve de reojo desde lejos)
+            beat = 0.5 + 0.5 * math.sin((time.monotonic() - self.t0) * 2 * math.pi / 1.2)
             edge = QColor(T.ACCENT)
-        p.setPen(QPen(edge, 1.5))
+            edge.setAlphaF(0.45 + 0.55 * (0.0 if T.reduce_motion() else beat))
+            width = 3.0 + 5.0 * (0.0 if T.reduce_motion() else beat)
+        p.setPen(QPen(edge, width))
         p.setBrush(QColor(T.SURFACE))
-        p.drawRoundedRect(r, 20, 20)
-        if ok:                                         # memoria retirada
+        p.drawRoundedRect(r.adjusted(width / 2, width / 2, -width / 2, -width / 2), 28, 28)
+        art = QRectF(r.left() + H * 0.12, r.top() + H * 0.10, H * 0.62, H * 0.80)   # el dibujo, a la izquierda
+        text_x = art.right() + H * 0.14
+        tw = r.right() - text_x - H * 0.10
+        if ok:                                         # memoria retirada: palomita grande
             path = QPainterPath()
-            path.moveTo(r.left() + 52, r.center().y() + 2)
-            path.lineTo(r.left() + 70, r.center().y() + 20)
-            path.lineTo(r.left() + 104, r.center().y() - 18)
-            pen = QPen(QColor(T.OK), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            cx, cy, u = art.center().x(), art.center().y(), H * 0.16
+            path.moveTo(cx - 1.4 * u, cy)
+            path.lineTo(cx - 0.4 * u, cy + u)
+            path.lineTo(cx + 1.5 * u, cy - 1.1 * u)
+            pen = QPen(QColor(T.OK), H * 0.05, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
             if ease < 1.0:                             # trazo parcial: la palomita se dibuja de izquierda a derecha
-                n = path.length() / 4.0                # (el patrón va en anchos de línea)
+                n = path.length() / pen.widthF()
                 pen.setDashPattern([max(0.01, n * ease), n + 1])
             p.setPen(pen)
             p.drawPath(path)
             p.setOpacity(ease)
-            p.setPen(QColor(T.TEXT))
-            p.setFont(font(20, QFont.Weight.Bold))
-            p.drawText(QRectF(r.left() + 150 - 12 * (1 - ease), r.top(), r.width() - 165, r.height()),
-                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "Memoria retirada")
+            p.setPen(QColor(T.OK))
+            p.setFont(font(H * 0.15, QFont.Weight.Bold))
+            p.drawText(QRectF(text_x - 12 * (1 - ease), r.top(), tw, r.height()),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "USB RETIRADA")
             return
-        # ranura del lector (abajo) y tarjeta SD saliendo hacia arriba, desvaneciéndose
-        slot = QRectF(r.left() + 28, r.bottom() - 34, 100, 10)
-        x0 = slot.left() + 22
-        y = slot.top() - 70 - 48 * QEasingCurve(QEasingCurve.Type.InOutCubic).valueForProgress(self.t)
-        card = QPainterPath()
-        card.moveTo(x0, y + 76)
-        card.lineTo(x0, y + 14)
-        card.lineTo(x0 + 14, y)
-        card.lineTo(x0 + 56, y)
-        card.lineTo(x0 + 56, y + 76)
-        card.closeSubpath()
+        # puerto (abajo) y memoria USB saliendo hacia arriba, con una flecha que sube
+        port = QRectF(art.left(), art.bottom() - H * 0.10, art.width(), H * 0.10)
+        sw = art.width() * 0.42                        # ancho de la USB
+        sx = art.center().x() - sw / 2
+        rise = H * 0.30 * QEasingCurve(QEasingCurve.Type.InOutCubic).valueForProgress(self.t)
+        body_h, plug_h = H * 0.36, H * 0.13
+        top = port.top() - body_h - plug_h * 0.25 - rise
         p.save()
-        p.setClipRect(QRectF(r.left(), r.top() + 6, 160, slot.top() + 5 - (r.top() + 6)))
-        p.setOpacity(self.a * (1.0 - max(0.0, self.t - 0.65) / 0.35))
+        p.setClipRect(QRectF(r.left(), r.top(), art.right() - r.left() + H * 0.05, port.top() + 2 - r.top()))
+        p.setOpacity(self.a * (1.0 - max(0.0, self.t - 0.7) / 0.3))
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(T.ACCENT))
-        p.drawPath(card)
-        p.setBrush(QColor(T.ACCENT_INK))
-        for k in range(4):
-            p.drawRoundedRect(QRectF(x0 + 18 + k * 9, y + 6, 5, 14), 2, 2)
+        p.setBrush(QColor(T.BORDER_HI))                # conector metálico
+        p.drawRoundedRect(QRectF(sx + sw * 0.18, top + body_h - 2, sw * 0.64, plug_h), 4, 4)
+        p.setBrush(QColor(T.SURFACE))
+        for k2 in range(2):
+            p.drawRect(QRectF(sx + sw * (0.30 + 0.25 * k2), top + body_h + plug_h * 0.25, sw * 0.14, plug_h * 0.3))
+        p.setBrush(QColor(T.ACCENT))                   # cuerpo de la USB
+        p.drawRoundedRect(QRectF(sx, top, sw, body_h), sw * 0.18, sw * 0.18)
+        p.setPen(QPen(QColor(T.ACCENT_INK), max(2.0, H * 0.012)))
+        p.setFont(font(H * 0.06, QFont.Weight.Bold))
+        p.drawText(QRectF(sx, top, sw, body_h), Qt.AlignmentFlag.AlignCenter, "USB")
         p.restore()
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(T.BORDER_HI))
-        p.drawRoundedRect(slot, 5, 5)
-        # textos
+        p.setBrush(QColor(T.BORDER_HI))                # el puerto
+        p.drawRoundedRect(port, 8, 8)
+        p.setBrush(QColor(T.BG) if hasattr(T, "BG") else QColor(0, 0, 0))
+        p.drawRoundedRect(QRectF(sx + sw * 0.12, port.top() + port.height() * 0.3, sw * 0.76, port.height() * 0.4), 3, 3)
+        # flecha hacia arriba, a la derecha de la USB, que se desliza
+        ax = art.right() - art.width() * 0.10
+        ay = art.top() + H * 0.30 - H * 0.08 * (0.0 if T.reduce_motion() else self.t)
+        arrow = QPainterPath()
+        u = H * 0.07
+        arrow.moveTo(ax, ay - u)
+        arrow.lineTo(ax + u, ay)
+        arrow.lineTo(ax + u * 0.4, ay)
+        arrow.lineTo(ax + u * 0.4, ay + 1.6 * u)
+        arrow.lineTo(ax - u * 0.4, ay + 1.6 * u)
+        arrow.lineTo(ax - u * 0.4, ay)
+        arrow.lineTo(ax - u, ay)
+        arrow.closeSubpath()
+        p.setOpacity(0.5 + 0.5 * self.a)
+        p.setBrush(QColor(T.ACCENT))
+        p.drawPath(arrow)
+        p.setOpacity(1.0)
+        # textos: lo importante, enorme
+        p.setPen(QColor(T.ACCENT))
+        p.setFont(font(H * 0.19, QFont.Weight.Black if hasattr(QFont.Weight, "Black") else QFont.Weight.Bold))
+        p.drawText(QRectF(text_x, r.top() + H * 0.10, tw, H * 0.30),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "SACA LA USB")
         p.setPen(QColor(T.TEXT))
-        p.setFont(font(19, QFont.Weight.Bold))
-        p.drawText(QRectF(r.left() + 150, r.top() + 30, r.width() - 165, 30), Qt.AlignmentFlag.AlignLeft,
-                   "Ya puedes retirar")
-        p.drawText(QRectF(r.left() + 150, r.top() + 56, r.width() - 165, 30), Qt.AlignmentFlag.AlignLeft,
-                   "la memoria")
+        p.setFont(font(H * 0.075, QFont.Weight.Bold))
+        p.drawText(QRectF(text_x, r.top() + H * 0.42, tw, H * 0.14),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "Fotos copiadas: ya puedes retirarla")
         p.setPen(QColor(T.MUTED))
-        p.setFont(font(12.5))
-        p.drawText(QRectF(r.left() + 150, r.top() + 94, r.width() - 165, 50),
-                   Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap,
-                   f"{self.names}: fotos copiadas. Este aviso sigue hasta que la saques; RawFlow continúa."
-                   if self.watching() else
-                   f"{self.names}: fotos copiadas y memoria expulsada. RawFlow sigue con el resto.")
+        p.setFont(font(H * 0.05))
+        p.drawText(QRectF(text_x, r.top() + H * 0.58, tw, H * 0.30),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
+                   f"{self.names} · este aviso sigue en pantalla hasta que la saques. RawFlow continúa con el evento.")
 
 
 # --------------------------------------------------------------------------

@@ -27,8 +27,12 @@ detalles de vestido/anillos/ramo, noches con flash, gente mirando abajo, besos y
   · mirar abajo (cabeza inclinada) o de perfil no es un parpadeo;
   · tomas accidentales (negra, blanca, piso, pared, techo o cielo sin nadie ni ningún detalle; fallidas sin ninguna
     cara a las que la IA da muy mala nota, o sin ninguna cara y casi sin nitidez frente al resto del evento —esta
-    también en Windows—; caras blancas o negras del todo) se apartan aunque estén solas;
-  · si por comparación salieran más de 3 y del 15 % del evento, algo no cuadra: esas no se apartan.
+    también en Windows—) se apartan aunque estén solas; las caras movidas, quemadas, oscuras o con los ojos cerrados
+    se apartan si en ese MOMENTO queda otra foto (si no, se queda la menos mala: ver más abajo);
+  · si por comparación salieran más de 3 y del 15 % del evento, algo no cuadra: esas no se apartan;
+  · RESPALDO (26-nov-2026): de 3 o más tomas casi iguales se quedan las 2 mejores (de 2, la mejor);
+  · NINGÚN MOMENTO SIN FOTO (26-nov-2026): si todas las tomas de un momento (seguidas, ≤10 s) se apartaban, la menos
+    mala se queda (ver keep_one_per_moment).
 """
 from __future__ import annotations
 
@@ -61,6 +65,10 @@ DUP_DIST = 0.16          # parecido máximo entre TODAS las tomas de un grupo de
 DUP_STRICT = 0.10        # si con 0,16 saliera repetida más de la mitad del evento, algo no cuadra: solo las clavadas
 DUP_MAX_SHARE = 0.5
 DUP_EV = 0.7             # misma toma con ≥0,7 EV de diferencia = horquillado (HDR), no repetida
+BACKUP_FROM = 3          # de un grupo de 3 o más casi iguales se quedan las 2 mejores (una de respaldo): 26-nov-2026,
+#                          el usuario: «siempre saca 2 buenas para que me quede respaldo» (de 2, se queda 1)
+MOMENT_GAP = 10.0        # s entre dos tomas seguidas del MISMO momento (familia en la iglesia, brindis…): ningún
+#                          momento se queda sin foto; si todas salen malas, se queda la menos mala
 DUP_BACK = 4             # rfui da el parecido con las 4 tomas anteriores: un grupo abarca como mucho 5 seguidas
 FAILED_AEST = -0.2       # sin ninguna cara y con nota de la IA por debajo de esto: toma fallida (medido: OSZ_0001
                          # negra -0,91, baile movido -0,50, disparo al techo -0,27; la peor buena, la banda, -0,04)
@@ -72,6 +80,12 @@ BLUR_ABS = 20            # o movida del todo (y además nitidez < 20). Medido (2
 SOFT_MAX_SHARE = 0.05   # las reglas «a solas» más finas (fallida, caras blancas/negras): si saltan en más del 5 %,
                          # algo no cuadra con esa cámara y no se aplican
 
+# Toma al piso / al monte en Windows (sin etiquetas de escena): «igual» = parte de la foto (rejilla 4×4) del mismo color
+# que el resto; «verde» = parte de la foto de hierba. Medido en el evento 25-nov-2026: las 8 tomas al monte que pasaron
+# como buenas tenían igual 0,69-0,94 y verde ≥ 0,96; las buenas sin caras (jardín con árboles, caballos, cortejo de
+# espaldas, de cerca, movida) igual ≤ 0,31.
+GROUND_SAME = 0.6
+GROUND_GREEN = 0.6
 FLOOR_WALL = {"floor", "wall", "ceiling", "tile", "carpet", "concrete", "ground", "asphalt", "rug", "wood_processed",
               "brick", "pavement", "sidewalk", "linoleum", "textile", "fabric", "blur", "dark", "night_sky",
               "sky", "cloudy", "clouds", "overcast"}
@@ -190,6 +204,10 @@ def _accidental(r: dict) -> str:
     if (float(r.get("desv", 99)) < 20 and float(r.get("estetica", 1)) < 0.3 and labs & FLOOR_WALL
             and not labs & DETAIL):
         return "toma al piso, a la pared, al techo o al cielo (sin nadie ni ningún detalle)"
+    same = r.get("igual")                                   # Windows: sin etiquetas, por la textura de toda la foto
+    if same is not None and float(same) >= GROUND_SAME and (
+            float(r.get("verde", 0)) >= GROUND_GREEN or float(r.get("desv", 99)) < 20):
+        return "toma al piso, al monte o a la pared (sin nadie: toda la foto es el mismo suelo)"
     return ""
 
 
@@ -218,6 +236,10 @@ BURNT_ANY = 55.0         # …o este % aunque no sea tan clara. Solo SIN caras: 
 BLUR_FACE_REL = 0.028    # la cara más nítida por debajo del 2,8 % de la mediana del evento: movida o desenfocada
 #                          (caras nítidas pero de poco contraste con poca luz dan 0,031-0,043: boda 14 nov, revisadas)
 BLUR_FACE_PX = 60        # (caras medidas a ≥ 60 px: más pequeñas no se juzgan)
+BLUR_NORM = 0.05         # Windows: la cara más nítida con «nitn» (seleccion_win.face_sharpness) por debajo: movida o
+#                          desenfocada. 26-nov-2026, el usuario: «dejaste pasar fotos borrosas». Revisadas a ojo las 447
+#                          buenas con cara de «25 nov 2026»: las 18 por debajo de 0,05 eran borrosas o blandas; por
+#                          encima empiezan las nítidas (0,058 en adelante)
 EYES_SHUT = 0.11         # los DOS ojos por debajo de esto: cerrados del todo (a medio cerrar o sonriendo, no)
 DEFECT_MAX_SHARE = 0.12  # si saltan en más del 12 % del evento, algo no cuadra con esa cámara: no se aparta ninguna
 
@@ -242,6 +264,9 @@ def _defect(r: dict, face_med: float = 0.0) -> str:
         nit = _sharp(r)
         if max(f.get("px", 0) for f in fs) >= BLUR_FACE_PX and 0 <= nit < BLUR_FACE_REL * face_med:
             return "movida o desenfocada: ninguna cara está nítida"
+    big = [f.get("nitn", -1) for f in fs if f.get("px", 0) >= BLUR_FACE_PX]
+    if big and min(big) >= 0 and max(big) < BLUR_NORM:      # (solo Windows mide «nitn»)
+        return "movida o desenfocada: ninguna cara está nítida"
     shut = [f for f in fs if _measurable(f) and f["ojoI"] < EYES_SHUT and f["ojoD"] < EYES_SHUT]
     if shut and not _hugging(fs):
         return ("ojos cerrados" + (" (una persona del grupo)" if len(fs) > 1 else "")
@@ -591,6 +616,9 @@ def _repeats(rows: List[dict], skip, limit: float = DUP_DIST, kept_better: Optio
         best = ranked[0]
         kept = [best]
         for i in ranked[1:]:
+            if len(g) >= BACKUP_FROM and len(kept) < 2:   # respaldo: de 3 o más casi iguales se quedan DOS
+                kept.append(i)
+                continue
             k = next((k for k in kept if not better_in(rows[i], rows[k])), None)
             if k is None:                                 # tiene algo mejor que cada una de las que se quedan
                 kept.append(i)
@@ -599,9 +627,14 @@ def _repeats(rows: List[dict], skip, limit: float = DUP_DIST, kept_better: Optio
                 continue
             # el defecto solo se nombra si es CLARO (misma persona, ver _worse_than); si no, es la misma foto, peor nota
             extra = ", con ojos cerrados" if closed[i] > closed[k] else DEFECT.get(_worse_than(rows[i], rows[k]), "")
-            tail = (f" (la mejor de {'las dos' if len(g) == 2 else f'las {len(g)}'})" if k == best
-                    else " (igual o mejor en todo)")
-            out[rows[i]["foto"]] = f"repetida{extra}: se queda {Path(rows[k]['foto']).stem}{tail}"
+            if len(g) == 2:
+                tail = " (la mejor de las dos)" if k == best else " (igual o mejor en todo)"
+                quedan = Path(rows[k]["foto"]).stem
+            else:                                         # se nombran las dos que se quedan
+                tail = f" (las 2 mejores de las {len(g)}: una de respaldo)"
+                quedan = " y ".join(Path(rows[j]["foto"]).stem for j in kept[:2])
+            out[rows[i]["foto"]] = f"repetida{extra}: se quedan {quedan}{tail}" if len(g) > 2 else \
+                f"repetida{extra}: se queda {quedan}{tail}"
     return out
 
 
@@ -642,7 +675,52 @@ def decide(rows: List[dict]) -> Dict[str, str]:
     if len(comp) > max(3, int(MAX_SHARE * n)):           # demasiadas por comparación: algo no cuadra (p. ej. una
         comp = {}                                        # cámara rara): esas no
     out = {**comp, **repes, **lone}
-    return {**{k: v for k, v in shut.items() if k not in out}, **out}
+    out = {**{k: v for k, v in shut.items() if k not in out}, **out}
+    for keep in keep_one_per_moment(ok_rows, out):
+        out.pop(keep, None)
+    return out
+
+
+NOT_A_MOMENT = ("toma negra", "toma blanca", "toma al piso", "toma fallida")
+
+
+def moments(rows: List[dict]) -> List[List[int]]:
+    """Tomas seguidas del mismo momento (≤ MOMENT_GAP s entre una y la siguiente; sin hora, casi iguales)."""
+    groups: List[List[int]] = []
+    for i, r in enumerate(rows):
+        a = rows[i - 1] if i else None
+        if a is not None and groups:
+            if "t" in a and "t" in r:
+                same = 0 <= float(r["t"]) - float(a["t"]) <= MOMENT_GAP
+            else:
+                same = r.get("dist_prev") is not None and float(r["dist_prev"]) <= BURST_DIST
+            if same:
+                groups[-1].append(i)
+                continue
+        groups.append([i])
+    return groups
+
+
+def _least_bad(r: dict, why: str):
+    """Para quedarse con una de un momento donde todas salieron mal: con caras, sin ojos cerrados, la más nítida."""
+    fs = [f for f in _main_faces(r) if f.get("px", 0) >= BLUR_FACE_PX]
+    nn = [f.get("nitn", -1) for f in fs if f.get("nitn", -1) >= 0]
+    return (bool(_main_faces(r)), "ojos cerrados" not in why, max(nn) if nn else 0.0, _sharp(r))
+
+
+def keep_one_per_moment(rows: List[dict], out: Dict[str, str]) -> List[str]:
+    """26-nov-2026, el usuario: «nunca me dejes sin ninguna foto de algún momento… si las 4 fotos están malas, aunque sea
+    déjame una». Fotos de un momento donde TODAS se apartaban: la menos mala se queda. (Las tomas accidentales —negra,
+    blanca, al piso, fallida sin nadie— no son un momento.)"""
+    keep = []
+    for g in moments(rows):
+        names = [rows[i]["foto"] for i in g]
+        if any(n not in out for n in names):
+            continue
+        cands = [i for i in g if not out[rows[i]["foto"]].startswith(NOT_A_MOMENT)]
+        if cands:
+            keep.append(rows[max(cands, key=lambda i: _least_bad(rows[i], out[rows[i]["foto"]]))]["foto"])
+    return keep
 
 
 KINDS = (("repetida", "repetida", "repetidas"), ("fallida", "fallida", "fallidas"),

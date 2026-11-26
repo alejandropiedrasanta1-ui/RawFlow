@@ -34,6 +34,23 @@ class LaneFailed(RuntimeError):
         super().__init__(msg)
         self.step = step
 
+class SetupMissing(RuntimeError):
+    """El programa está instalado pero le falta algo que RawFlow no puede arreglar solo (el preajuste, un plugin…):
+    reintentar no sirve y omitir el paso daría un «FIN OK» sin ese paso. El evento se para con el aviso."""
+
+
+# Motivos de available()/usable() por los que el paso SÍ se omite: el programa no está en este equipo o son pruebas.
+# Cualquier otro motivo (falta el preajuste, plugins de máscara…) para el evento con SetupMissing.
+NOT_HERE = ("solo en", "desactivado en pruebas", "no encuentro Retouch4me", "no encuentro Luminar",
+            "falta r4m_worker")
+
+
+def not_installed(why: str) -> bool:
+    return str(why).startswith(NOT_HERE)
+
+
+DXO_EXES = ("pureraw", "dxo pureraw")   # .exe de DxO PureRAW (en minúsculas): sus ventanas van minimizadas
+
 RAW_DIR = core.RAW_SUBFOLDER          # "1 Original"
 DNG_DIR = core.OUTPUT_SUBFOLDER       # "2 DNGs"
 IMAGEN_DIR = core.IMAGEN_SUBFOLDER    # «3 Imagen AI» (en la carpeta del evento, desde 4.15)
@@ -66,10 +83,20 @@ def deliver_dir(ev: Path, off=()) -> Path:
     return Path(ev) / FINAL_DIR
 
 
+def pres_name(v: Path, n: int) -> str:
+    """Nombre del video en «6 Presentación de fotos»: «Presentación horizontal.mp4» / «Presentación vertical.mp4»."""
+    s = v.stem.lower()                    # CineSlide añade la fecha: «Presentación_horizontal 2026-11-26 08.00»
+    for k in ("horizontal", "vertical"):
+        if k in s:
+            return f"Presentación {k}.mp4"
+    return "Presentación.mp4" if n == 1 else v.name
+
+
 def presentation_current(out: Path, final: Path) -> bool:
     """¿Hay video y es posterior a TODAS las fotos finales? (si se rehízo alguna foto, el video se rehace)"""
     vids = list(out.glob("*.mp4")) if out.is_dir() else []
-    if not vids:
+    names = {v.name.lower() for v in vids}
+    if not {"presentación horizontal.mp4", "presentación vertical.mp4"} <= names:   # faltan los dos formatos
         return False
     newest = max((p.stat().st_mtime for p in final.glob("*.jp*g")), default=0.0) if final.is_dir() else 0.0
     return min(v.stat().st_mtime for v in vids) >= newest - 60
@@ -211,7 +238,11 @@ def quit_other_apps(log=lambda s: None, wait: float = 12.0):
 # cerrarla lo cerraría a él). Todo lo demás con ventana, sí (pedido del usuario: «que quede camino libre»).
 _KEEP_WIN = {"explorer.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "searchhost.exe",
              "searchapp.exe", "textinputhost.exe", "lockapp.exe", "applicationframehost.exe", "systemsettings.exe",
-             "rawflow.exe", "securityhealthsystray.exe", "ctfmon.exe", "dwm.exe", "taskmgr.exe"}
+             "rawflow.exe", "securityhealthsystray.exe", "ctfmon.exe", "dwm.exe", "taskmgr.exe",
+             # 25-nov-2026, pedido del usuario: poder usar el navegador (en la otra pantalla) mientras el evento
+             # trabaja; antes se cerraba al empezar. Si una ventana suya tapa la app que RawFlow maneja, se minimiza
+             # (imagen_win.Screen._uncover), no se cierra.
+             "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe"}
 # En segundo plano se cierra TODO lo que no es de Windows (Adobe, telemetrías de programas, actualizadores, Claude,
 # servidores locales…), salvo lo que cuida el equipo: el control de ventiladores y bombas (sin él, con la tarjeta al
 # 100 % durante horas, el equipo podría calentarse) y el antivirus.
@@ -760,15 +791,18 @@ class Pipeline(QThread):
             try:
                 return fn() or "done"
             except Exception as e:  # noqa: BLE001
-                if self._stop or str(e) == "Cancelado." or isinstance(e, LaneFailed):
+                if self._stop or str(e) == "Cancelado." or isinstance(e, (LaneFailed, SetupMissing)):
                     raise
                 msg = str(e)
                 fatal = msg.startswith(("No encuentro", "RawFlow necesita permiso", "PureRAW no admite"))
-                if fatal and core.SYSTEM == "Windows" and msg.startswith((
-                        "No encuentro la ventana", "No encuentro «Proyectos»", "No encuentro la calidad",
-                        "No encuentro el botón")):
-                    fatal = False                          # Windows: la pantalla no se leyó bien UNA vez (no falta
-                    #                                        ninguna app): eso sí se arregla reintentando
+                if fatal and core.SYSTEM == "Windows" and msg.startswith("No encuentro") and not msg.startswith((
+                        "No encuentro la app", "No encuentro Adobe Bridge", "No encuentro DxO", "No encuentro Retouch4me",
+                        "No encuentro el perfil", "No encuentro el proyecto")):
+                    # Windows: «No encuentro …» casi siempre es que el OCR no leyó UNA vez un rótulo (no falta ninguna
+                    # app): eso se arregla reintentando. 25-nov-2026 (revisión): todos los de Luminar paraban el evento
+                    # entero en el paso 6 sin reintentar ni apartar nada. Solo es fatal si falta un programa, el perfil
+                    # o el proyecto de Imagen (reintentar no lo crea y podría cerrar Imagen mientras sube).
+                    fatal = False
                 if fatal:
                     raise                                  # falta una app o un permiso: reintentar no sirve
                 if k == tries:                             # último intento: apartar lo que no sale y SEGUIR
@@ -840,7 +874,7 @@ class Pipeline(QThread):
                 self.summary["final"] = len(src)
                 return "done"
             if i == STEP_LUM:                                  # Luminar: las finales de Retouch4me siguen valiendo
-                self._warn(f"Luminar no pudo aplicar «CINEMA AJUSTE» ({why}). Las fotos finales de Retouch4me están "
+                self._warn(f"Luminar no pudo aplicar su preajuste ({why}). Las fotos finales de Retouch4me están "
                            f"completas en «{FINAL_DIR}»; se puede rehacer con «Reintentar desde el paso {STEP_LUM + 1}».")
                 self.summary["sin_luminar"] = True
                 return "done"
@@ -912,6 +946,9 @@ class Pipeline(QThread):
         from . import luminar_win
         ok, why = luminar_win.available()
         if not ok:
+            if not not_installed(why):
+                raise SetupMissing(f"Luminar: {why}. Créalo con ese nombre (o desactiva Luminar con doble clic en "
+                                   "su paso) y pulsa Reintentar.")
             self.detail.emit(f"Luminar no disponible en este equipo ({why}): paso omitido.")
             return "skip"
         out = self.ev_dir / LUM_DIR
@@ -973,20 +1010,34 @@ class Pipeline(QThread):
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         made, last = [], ""
         t_pres = time.monotonic()
+        import shutil
         import threading
         seen = [time.monotonic()]
 
+        def kill_all():                               # CineSlide y lo que lanzó (el codificador de video)
+            try:
+                import psutil
+                _kill_tree(psutil.Process(p.pid))
+            except Exception:  # noqa: BLE001
+                try:
+                    p.kill()
+                except OSError:
+                    pass
+
         def watchdog():                               # colgado sin avanzar 5 min → se corta y se reintenta
             while p.poll() is None:
-                if time.monotonic() - seen[0] > 300:
-                    p.kill()
+                # 25-nov-2026 (revisión): «Parar» solo se veía cuando CineSlide escribía una línea; callado (al
+                # codificar) «Parando…» podía tardar hasta 5 min. Ahora se mira cada 2 s.
+                if self._stop or time.monotonic() - seen[0] > 300:
+                    kill_all()
                     return
                 time.sleep(2)
         threading.Thread(target=watchdog, daemon=True).start()
         for line in p.stdout:
             seen[0] = time.monotonic()
             if self._stop:
-                p.terminate()
+                kill_all()
+                shutil.rmtree(tmp, ignore_errors=True)
                 raise RuntimeError("Cancelado.")
             line = line.strip()
             if line.startswith("PROG "):
@@ -1009,14 +1060,18 @@ class Pipeline(QThread):
             elif line:
                 last_err = line
         rc = p.wait()
+        if self._stop:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise RuntimeError("Cancelado.")
         if rc != 0 or not made:
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
             raise RuntimeError("CineSlide no pudo crear el video" + (f": {locals().get('last_err', '')}" or "."))
         out.mkdir(parents=True, exist_ok=True)
+        for old in out.glob("*.mp4"):                 # los videos de antes (de otras fotos finales) sobran
+            old.unlink(missing_ok=True)
         for v in made:
-            name = "Presentación.mp4" if len(made) == 1 else v.name
-            v.replace(out / name)
+            v.replace(out / pres_name(v, len(made)))
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
         self.summary["presentation"] = str(out)
@@ -1256,7 +1311,7 @@ class Pipeline(QThread):
                     res = ("off", "omitido en este equipo", "omitido")
                 else:
                     ok = n_lum >= len(fin)
-                    res = ("ok" if ok else "warn", f"{n_lum:,} de {len(fin):,} con «CINEMA AJUSTE» en «{LUM_DIR}»",
+                    res = ("ok" if ok else "warn", f"{n_lum:,} de {len(fin):,} con Luminar en «{LUM_DIR}»",
                            f"{n_lum:,} con Luminar" if ok else f"{n_lum:,} de {len(fin):,}")
             elif i == STEP_PRES:
                 out = self.ev_dir / PRES_DIR
@@ -1266,7 +1321,8 @@ class Pipeline(QThread):
                     res = ("off", "desactivado · sin presentación", "sin video")
                 elif vids and presentation_current(out, final):
                     mb = sum(v.stat().st_size for v in vids) / 1e6
-                    res = ("ok", f"{vids[0].name} · {mb:,.0f} MB · con las {len(fin):,} finales", "video al día")
+                    res = ("ok", f"horizontal y vertical · {mb:,.0f} MB · con las {len(fin):,} finales · 3 s por foto",
+                           "videos al día")
                 elif state == "skip" and not fin:
                     res = ("off", "omitido en este equipo", "omitido")
                 else:
@@ -1430,10 +1486,12 @@ class Pipeline(QThread):
             else:
                 dev = core.win_device_id(mp) if core.SYSTEM == "Windows" else ""
                 disk, ok = "", core.eject_drive(mp)
-                if ok and dev:                    # USB expulsada entera (en espera hasta desenchufarla): el aviso se
-                    present, problem = core.win_devnode(dev)      # queda hasta que la quitas de verdad
-                    if present and problem == 47:
-                        disk = "win:" + dev
+                if ok and dev:                    # el aviso se queda hasta que la quitas de verdad: mientras el
+                    present, _problem = core.win_devnode(dev)     # dispositivo siga en la lista (26-nov-2026: antes
+                    # solo con el problema 47; si no, el aviso se iba a los 9 s)
+                    disk = ("win:" + dev) if present else "wait:"
+                elif ok and core.SYSTEM == "Windows":
+                    disk = "wait:"                # no se sabe cuál es: el aviso se queda hasta que lo cierres tú
             (out if ok else bad).append(Path(mp).name)
             if ok:
                 items.append({"name": Path(mp).name, "disk": disk or ""})
@@ -1562,10 +1620,17 @@ class Pipeline(QThread):
         t0 = clk.setdefault("t0", time.monotonic())
         changed = time.monotonic()
         last, total = -1, len(stems)
-        dlg_t = 0.0
+        dlg_t = hide_t = 0.0
         while True:
             if stop():
                 raise RuntimeError("Cancelado.")
+            if core.SYSTEM == "Windows" and time.monotonic() - hide_t > 0.4:
+                hide_t = time.monotonic()                    # en silencio (26-nov-2026): DxO trabaja por lotes y en
+                try:                                         # Windows nunca se mira su ventana: minimizada, sin foco
+                    from . import winscreen
+                    winscreen.minimize_quiet(DXO_EXES)
+                except Exception:  # noqa: BLE001
+                    pass
             core.collect_dxo_dngs(self.ev_dir)               # Windows: PureRAW los deja junto al RAW
             done_set = stems & core.processed_stems(dngs)
             done = len(done_set)
@@ -1882,7 +1947,15 @@ class Pipeline(QThread):
         if no_mac and STEP_RET not in self.off:   # Windows: solo por el motor directo (sin la ventana de Arams)
             from . import retouch_engine as _re
             ok_w, why_w = _re.usable() if core.SYSTEM == "Windows" else (False, "solo en Mac y Windows")
+            for _ in range(4):                    # la base de datos de Arams puede estar ocupada un momento (Arams
+                if ok_w or not str(why_w).startswith("no pude leer"):   # guardando): eso no es que falte algo
+                    break
+                time.sleep(3)
+                ok_w, why_w = _re.usable()
             if not ok_w:
+                if not not_installed(why_w):
+                    raise SetupMissing(f"Retouch4me: {why_w}. Arréglalo en Arams (o desactiva Retouch4me con doble "
+                                       "clic en su paso) y pulsa Reintentar.")
                 self.detail.emit(f"Retouch4me automático no disponible en este equipo ({why_w}): paso omitido.")
                 return "skip"
             if not core.jpg_stems(img):           # Imagen se omitió (sin clave API): no hay nada que retocar

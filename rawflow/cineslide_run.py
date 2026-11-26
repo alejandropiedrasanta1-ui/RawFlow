@@ -8,6 +8,8 @@ Imprime «PROG <0..1> <texto>» mientras trabaja y «OK <ruta>» por cada video 
 import os
 import sys
 
+SEGUNDOS_POR_FOTO = 3.0
+
 
 def main():
     fotos_dir, salida, nombre = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -31,6 +33,19 @@ def main():
     opciones = [o for o in (defs.get("estilo_diseno", {}).get("choices") or []) if str(o).startswith(tema + ":")]
     vals["estilo_diseno"] = opciones[0] if opciones else tema
     vals["incluir_videos"] = True
+    # Pedido del usuario (26-nov-2026): SIEMPRE 3 s por foto y los dos videos (horizontal y vertical), aunque en
+    # CineSlide se haya dejado otra cosa la última vez.
+    for i in ("t_segundos_por_foto", "t1_segundos_por_foto"):
+        if i in defs:
+            vals[i] = SEGUNDOS_POR_FOTO
+    dos = [f for f in (getattr(m, "FORMATOS_VIDEO", None) or []) if str(f).startswith("Los dos")]
+    if not dos or not hasattr(m, "formatos_de_video"):
+        # RawFlow da la presentación por hecha solo con los DOS videos: con un CineSlide que no sabe hacerlos, se
+        # rehacía en cada vuelta sin decir por qué (revisión 26-nov-2026). Mejor avisar claro.
+        print("ERROR este CineSlide no puede hacer los dos formatos (horizontal y vertical): actualiza CineSlide",
+              flush=True)
+        return 3
+    vals["formato_video"] = dos[0]
 
     ext = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".heic", ".webp")
     fotos = [os.path.join(fotos_dir, f) for f in os.listdir(fotos_dir)
