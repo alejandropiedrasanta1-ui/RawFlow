@@ -88,10 +88,48 @@ def available() -> Tuple[bool, str]:
     return True, ""
 
 
-def run(event_dir: Path, src: Path, out: Path, log: Log, should_stop=lambda: False,
-        progress=lambda f: None) -> int:
-    """Todo el paso. Devuelve cuántas fotos hay en `out` al terminar (con el preajuste comprobado)."""
+def _catalog_for(event_dir: Path) -> Path:
     from . import core
+    cat = catalog_dir() / (core.clean_name(Path(event_dir).name) or "Evento")
+    cat = core.unique_folder(cat)                    # (si se rehace, otro catálogo nuevo: nunca se mezclan)
+    return cat.parent / (cat.name + ".luminarneo")   # Luminar crea él la carpeta «<evento>»
+
+
+def prepare(event_dir: Path, log: Log, should_stop=lambda: False) -> Path:
+    """27-nov-2026 (más rápido): Luminar abierto y con el catálogo NUEVO y vacío del evento, mientras Retouch4me
+    termina sus últimas fotos (el motor de Retouch4me no tiene ventana: no se estorban). No toca ninguna foto: el
+    paso 6 empieza igual, después del 5, solo que sin esperar a que Luminar se abra (~1:30 menos). Devuelve el
+    catálogo; si algo falla, Luminar queda cerrado y el paso 6 lo hace todo como siempre."""
+    from . import imagen_win as iw
+    s = iw.Screen(log, should_stop, EXE)
+    cat = _catalog_for(event_dir)
+    try:
+        _open(s, log)
+        _new_catalog(s, cat, log)
+        return cat
+    except Exception:
+        try:
+            iw.close_app(EXE, wait=30)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+
+def _still_prepared(s, cat: Path) -> bool:
+    """¿Sigue abierto Luminar con el catálogo vacío que se preparó?"""
+    if not cat or not Path(cat).exists() or not s.main_window():
+        return False
+    try:
+        s.front(force=True)
+        return bool(s.find("Aún no hay fotos", boxes=s.ocr()) or s.find("Aún no hay fotos", boxes=s.ocr_tiles(3)))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def run(event_dir: Path, src: Path, out: Path, log: Log, should_stop=lambda: False,
+        progress=lambda f: None, prepared: Optional[Path] = None) -> int:
+    """Todo el paso. Devuelve cuántas fotos hay en `out` al terminar (con el preajuste comprobado).
+    `prepared`: catálogo vacío ya abierto por prepare() (si ya no está, se abre todo como siempre)."""
     from . import imagen_win as iw
     event_dir, src, out = Path(event_dir), Path(src), Path(out)
     fotos = _jpgs(src)
@@ -99,14 +137,15 @@ def run(event_dir: Path, src: Path, out: Path, log: Log, should_stop=lambda: Fal
     if not n:
         return 0
     s = iw.Screen(log, should_stop, EXE)
-    cat = catalog_dir() / (core.clean_name(event_dir.name) or "Evento")
-    cat = core.unique_folder(cat)                    # (si se rehace, otro catálogo nuevo: nunca se mezclan)
     tmp = out.with_name(out.name + ".exportando")    # se exporta aparte y se cambia al final: nunca a medias
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
     try:
-        _open(s, log)
-        _new_catalog(s, cat.parent / (cat.name + ".luminarneo"), log)   # Luminar crea él la carpeta «<evento>»
+        if prepared and _still_prepared(s, prepared):
+            log(f"Luminar: ya estaba abierto con el catálogo nuevo «{Path(prepared).stem}».")
+        else:
+            _open(s, log)
+            _new_catalog(s, _catalog_for(event_dir), log)
         _add_folder(s, src, n, log)
         _select_all(s)
         _apply_preset(s, log)
@@ -200,6 +239,11 @@ def _menu_walk(s, path, then: str) -> None:
 
     for k in range(8):                               # (con un catálogo grande, Luminar tarda en responder al abrir)
         s.front(force=True)                          # Luminar delante (otra ventana o Alt+Tab se llevan el clic)
+        if k and (k % 2 == 0 or s.find("Buscar en sus fotos", boxes=s.ocr())):
+            # 27-nov-2026 (prueba de 5 fotos): un Ctrl+F suelto abrió «Buscar en sus fotos» encima y el menú no se
+            # abría (3 intentos perdidos). Esc cierra la búsqueda, un menú a medias o la vista de una foto.
+            s.esc()
+            time.sleep(0.6)
         if s.find("Archivo", exact=True, boxes=read(k), region=(0, 0.04, 0.08, 0.12)) or                 s.find("Archivo", exact=True, boxes=read(k + 1), region=(0, 0.04, 0.08, 0.12)):
             break
         s.click(s.rect[0] + 0.033 * s.rect[2], s.rect[1] + 0.033 * s.rect[3], restore=False)   # el logo

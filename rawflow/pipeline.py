@@ -805,6 +805,7 @@ class Pipeline(QThread):
         #                                 faltaba): con eso se aprende su tiempo, no con el total del evento
         self._quitter = None            # hilo que cierra las demás apps al empezar (lo arranca run())
         self._archiver = None           # (compatibilidad) archivado en segundo plano
+        self._preps = {}                # «abrir antes» (27-nov-2026): nombre → [hilo, resultado, error]
         self._to_archive: List[str] = []        # proyectos de Imagen ya descargados, para archivar
 
     def stop(self):
@@ -821,6 +822,80 @@ class Pipeline(QThread):
     def stopped(self) -> bool:
         return self._stop
 
+    # ---- abrir antes (27-nov-2026, «más rápido»): mientras un paso termina, se ABRE y PREPARA el programa del
+    # siguiente (Imagen, Luminar) sin tocar ninguna foto. El orden de los pasos no cambia: el siguiente paso espera a
+    # que la preparación acabe (nunca dos hilos manejando la misma app) y, si falló, lo hace todo como siempre.
+    def _prep(self, name: str, fn) -> None:
+        """Arranca `fn()` en segundo plano una sola vez por evento."""
+        if name in self._preps or self._stop:
+            return
+        import threading
+        box = [None, None, None]
+
+        def go():
+            try:
+                box[1] = fn()
+            except Exception as e:  # noqa: BLE001
+                box[2] = e
+        box[0] = threading.Thread(target=go, daemon=True, name=f"abrir-antes-{name}")
+        self._preps[name] = box
+        box[0].start()
+
+    def _prep_result(self, name: str, timeout: float = 240):
+        """Espera a que acabe la preparación `name` y devuelve su resultado (None si no hubo o falló)."""
+        box = self._preps.pop(name, None)
+        if not box:
+            return None
+        t0 = time.monotonic()
+        while box[0].is_alive() and time.monotonic() - t0 < timeout:
+            box[0].join(0.5)
+            if self._stop:
+                break
+        if box[0].is_alive() or box[2] is not None:
+            if box[2] is not None and str(box[2]) != "Cancelado.":
+                self.detail.emit(f"   (preparar {name} antes no salió: {str(box[2]).splitlines()[0][:90]}; "
+                                 "se hace en su paso)")
+            return None
+        return box[1]
+
+    def _drop_preps(self) -> None:
+        """Evento acabado o parado con preparaciones sin usar: Luminar se cierra (no se queda abierto de más)."""
+        names = list(self._preps)
+        for name in names:
+            self._prep_result(name, timeout=60)
+        if "luminar" in names:
+            try:
+                from . import imagen_win, luminar_win
+                if not imagen_win.no_apps():
+                    imagen_win.close_app(luminar_win.EXE, wait=20)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _maybe_prep_imagen(self, done: int, total: int) -> None:
+        """DxO con ≤ 15 fotos por hacer: la app de Imagen se abre y se deja en su lista de proyectos (sin crear ni
+        subir nada: el proyecto se crea en el paso 4, con TODOS los DNG ya hechos)."""
+        if "imagen-hecho" in self.__dict__ or total - done > 15 or STEP_IMG in self.off:
+            return
+        self.__dict__["imagen-hecho"] = True
+        if core.SYSTEM != "Windows" or not _real_apps():
+            return
+        from . import imagen, imagen_win
+        if imagen.get_api_key() or not imagen_win.available() or not imagen_win.bridge_path():
+            return
+        self._prep("imagen", lambda: imagen_win.warm_up(self.detail.emit, self.stopped))
+
+    def _maybe_prep_luminar(self, frac: float, total: int) -> None:
+        """Retouch4me (motor sin ventana) con ≤ 12 fotos por hacer: Luminar se abre con su catálogo nuevo."""
+        if "luminar" in self._preps or "luminar-hecho" in self.__dict__ or frac < 0 or total <= 0:
+            return
+        if (1 - frac) * total > 12 or STEP_LUM in self.off or core.SYSTEM != "Windows" or not _real_apps():
+            return
+        from . import luminar_win
+        if not luminar_win.available()[0]:
+            return
+        self.__dict__["luminar-hecho"] = True
+        self._prep("luminar", lambda: luminar_win.prepare(self.ev_dir, self.detail.emit, self.stopped))
+
     # ------------------------------------------------------------------
     def run(self):
         awake = full_speed()
@@ -833,6 +908,7 @@ class Pipeline(QThread):
         try:
             self._run_steps()
         finally:
+            self._drop_preps()
             restore_stage_manager()
             if core.SYSTEM == "Darwin":
                 from .imagen_ui import restore_clipboard
@@ -1089,8 +1165,9 @@ class Pipeline(QThread):
         self.work[STEP_LUM] = (len(src), _bytes(src))
         self.progress.emit(-1)
         self.status.emit(f"Luminar aplicando «{luminar_win.PRESET}» a {len(src):,} fotos…")
+        prepared = self._prep_result("luminar")          # (abierto mientras Retouch4me acababa)
         n = luminar_win.run(self.ev_dir, final, out, self.detail.emit, should_stop=self.stopped,
-                            progress=self.progress.emit)
+                            progress=self.progress.emit, prepared=prepared)
         if n < len(src):
             raise RuntimeError(f"Luminar exportó {n} de {len(src)} fotos.")
         self.summary["luminar"] = n
@@ -1769,6 +1846,7 @@ class Pipeline(QThread):
             done_set = stems & core.processed_stems(dngs)
             done = len(done_set)
             now = time.monotonic()
+            self._maybe_prep_imagen(done, total)
             if done != last:
                 last, changed = done, now
                 if done >= 1 and "first" not in clk:
@@ -1988,6 +2066,7 @@ class Pipeline(QThread):
             self.status.emit("Imagen AI editando…")
             from PySide6.QtCore import QSettings
             tipo = str(QSettings("RawFlow", "RawFlow").value("imagen_type", imagen.DEFAULT_TYPE))
+            self._prep_result("imagen", timeout=150)       # (se abrió mientras DxO acababa: que termine antes)
             imagen_win.run(self.ev_dir, DNG_DIR, self.detail.emit, should_stop=self.stopped, photo_type=tipo,
                            out_dir=img, progress=self.progress.emit,
                            charge_ok=os.environ.get("RAWFLOW_PRUEBA_SIN_COBRO") != "1")   # solo pruebas: no descargar
@@ -2149,8 +2228,11 @@ class Pipeline(QThread):
         if ok:                                    # motor directo: mismo resultado que Arams, sin ventana ni clics
             self.status.emit(f"Retouch4me retocando {len(src):,} fotos con CINEMA…")
             try:
+                def prog(f, _n=len(todo)):
+                    self.progress.emit(f)
+                    self._maybe_prep_luminar(f, _n)      # últimas fotos: Luminar se va abriendo
                 n = retouch_engine.retouch(img, final, self.detail.emit, should_stop=self.stopped,
-                                           progress=self.progress.emit, expected_total=len(src))
+                                           progress=prog, expected_total=len(src))
             except retouch_engine.EngineUnavailable as e:
                 why = str(e)
         if n is None and no_mac:                  # en Windows no hay camino con la ventana de Arams

@@ -1532,7 +1532,7 @@ def p68():
     from rawflow import luminar_win as L, pipeline as pl
     llamadas, usadas = [], []
 
-    def run_ok(ev, src, out, log, should_stop=lambda: False, progress=lambda f: None):
+    def run_ok(ev, src, out, log, should_stop=lambda: False, progress=lambda f: None, prepared=None):
         llamadas.append(Path(src).name)
         out.mkdir(parents=True, exist_ok=True)
         for q in sorted(Path(src).glob("*.jpg")):
@@ -2577,6 +2577,66 @@ def p89():
                        ("Retouch4me Arams.exe", psutil.ABOVE_NORMAL_PRIORITY_CLASS),
                        ("Adobe Bridge.exe", psutil.NORMAL_PRIORITY_CLASS),
                        ("Retouch4me Arams.exe", psutil.NORMAL_PRIORITY_CLASS)], puestas
+
+
+@prueba("Abrir antes (27-nov-2026, más rápido): con ≤ 12 fotos por retocar Luminar se abre con su catálogo nuevo, y con "
+        "≤ 15 DNG por hacer la app de Imagen queda en su lista; el paso siguiente espera a que acabe y usa lo preparado; "
+        "si falla, lo hace todo en su paso; desactivado (doble clic), nada se abre")
+def p90():
+    from rawflow import pipeline as pl, luminar_win as L, imagen_win as iw, imagen
+    ev = td._evento_tandas(2)
+    preparados, mensajes = [], []
+    with td._Falsos() as f:
+        f._set(pl, "_real_apps", lambda: True)
+        f._set(core, "SYSTEM", "Windows")
+        f._set(L, "available", lambda: (True, ""))
+        f._set(L, "prepare", lambda ev_, log, stop: (preparados.append("luminar"), Path("cat.luminarneo"))[1])
+        f._set(iw, "available", lambda: True)
+        f._set(iw, "bridge_path", lambda: Path("Bridge.exe"))
+        f._set(iw, "warm_up", lambda log, stop: preparados.append("imagen"))
+        f._set(imagen, "get_api_key", lambda: "")
+        p = pl.Pipeline(ev, [], DXO, "CINEMA", [], 0)
+        p.detail.connect(mensajes.append)
+        p._maybe_prep_luminar(0.5, 100)                 # 50 por hacer: aún no
+        p._maybe_prep_imagen(150, 211)
+        assert not p._preps and not preparados, preparados
+        p._maybe_prep_luminar(0.9, 100)                 # 10 por hacer: se abre (una sola vez)
+        p._maybe_prep_luminar(0.95, 100)
+        p._maybe_prep_imagen(200, 211)
+        assert p._prep_result("luminar") == Path("cat.luminarneo")
+        assert p._prep_result("imagen", timeout=5) is None and sorted(preparados) == ["imagen", "luminar"], preparados
+        assert p._prep_result("luminar") is None        # ya se usó
+        # falla al prepararlo: el paso lo hace todo (resultado None) y queda dicho
+        f._set(L, "prepare", lambda ev_, log, stop: (_ for _ in ()).throw(RuntimeError("no se abrió")))
+        p2 = pl.Pipeline(ev, [], DXO, "CINEMA", [], 0)
+        p2.detail.connect(mensajes.append)
+        p2._maybe_prep_luminar(0.99, 100)
+        assert p2._prep_result("luminar") is None and any("no se abrió" in m for m in mensajes), mensajes
+        # desactivados: nada
+        p3 = pl.Pipeline(ev, [], DXO, "CINEMA", [], 0, off={core.STEP_LUM, core.STEP_IMG})
+        p3._maybe_prep_luminar(0.99, 100)
+        p3._maybe_prep_imagen(210, 211)
+        assert not p3._preps
+
+
+@prueba("Tus ventanas en tu monitor (27-nov-2026): durante el evento, Chrome o una carpeta que caen en el monitor de "
+        "trabajo vuelven al libre; nunca las apps que maneja RawFlow, DxO, RawFlow misma, el escritorio ni la barra de "
+        "tareas", solo_win="ventanas de Windows")
+def p91():
+    import os
+    from rawflow import winscreen as ws
+    ws.APP_EXES.update({"imagenai.exe", "adobe bridge.exe", "luminar neo.exe"})
+    w = lambda exe, pid=1, ww=900, hh=600: {"exe": exe, "pid": pid, "rect": (0, 0, ww, hh)}   # noqa: E731
+    assert ws._is_yours(w("chrome.exe"), "Chrome_WidgetWin_1", 0)
+    assert ws._is_yours(w("explorer.exe"), "CabinetWClass", 0)                    # una carpeta
+    for exe in ("ImagenAI.exe", "Adobe Bridge.exe", "Luminar Neo.exe", "PureRAWv6.exe", "RawFlow.exe",
+                "SearchHost.exe"):
+        assert not ws._is_yours(w(exe), "X", 0), exe
+    assert not ws._is_yours(w("explorer.exe"), "Shell_TrayWnd", 0)              # barra de tareas
+    assert not ws._is_yours(w("explorer.exe"), "Progman", 0)                    # escritorio
+    assert not ws._is_yours(w("chrome.exe", pid=os.getpid()), "X", 0)           # RawFlow misma
+    assert not ws._is_yours(w("nvidia overlay.exe"), "X", 0x80)                 # ventana flotante (herramienta)
+    assert not ws._is_yours(w("chrome.exe", ww=100, hh=40), "X", 0)             # avisos diminutos
 
 
 def main() -> int:

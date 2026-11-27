@@ -12,6 +12,7 @@ rawflow/winlock.py (el ratón y el teclado físicos ya no se bloquean).
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
 import threading
 import time
@@ -294,6 +295,96 @@ def set_work(rect: Optional[Tuple[int, int, int, int]], quiet: bool = True) -> N
         QUIET[0] = bool(quiet and rect)
         _FOCUS["user"], _FOCUS["last"], _FOCUS["busy"] = None, 0.0, 0
         _SAVED[0] = None
+        th = _AWAY.get("thread")
+        if QUIET[0] and sys.platform == "win32" and not (th and th.is_alive()):
+            th = threading.Thread(target=_away_loop, daemon=True, name="tus-ventanas-en-tu-monitor")
+            _AWAY["thread"] = th
+            th.start()
+
+
+# ---- tus ventanas, en tu monitor (27-nov-2026, el usuario: «no permitas que Google u otras carpetas que use vayan al
+# otro monitor mientras esté corriendo»). Windows abre las ventanas nuevas en el monitor «activo», y durante el evento
+# ése es el de trabajo (ahí están las apps que maneja RawFlow): Chrome o una carpeta acababan debajo de la pantalla de
+# proceso. Mientras dura el evento, la ventana de un programa de la persona que cae en el monitor de trabajo vuelve
+# sola al monitor libre, del mismo tamaño (maximizada si lo estaba). Nunca mientras la arrastra con el ratón.
+_AWAY = {"thread": None}
+AWAY_EVERY = 0.5
+NOT_YOURS = ("pureraw", "dxo", "cineslide", "rawflow")          # (además de APP_EXES): del evento o RawFlow misma
+_SHELL_CLASSES = ("progman", "workerw", "shell_traywnd", "shell_secondarytraywnd", "notifyiconoverflowwindow",
+                  "windows.ui.core.corewindow", "xamlexplorerhostislandwindow", "topleveldragwindow")
+_SHELL_EXES = ("shellexperiencehost.exe", "searchhost.exe", "startmenuexperiencehost.exe", "textinputhost.exe",
+               "lockapp.exe", "searchapp.exe", "shellhost.exe")
+
+
+def free_monitor() -> Optional[Tuple[int, int, int, int]]:
+    """El monitor que queda libre para la persona (el más grande que no es el de trabajo)."""
+    r = WORK[0]
+    others = [m for m in monitors() if m != r]
+    return max(others, key=lambda m: m[2] * m[3]) if others else None
+
+
+def _is_yours(w: dict, cls: str, exstyle: int) -> bool:
+    exe = (w.get("exe") or "").lower()
+    if not exe or w.get("pid") == os.getpid() or exe in APP_EXES or exe.startswith(NOT_YOURS) or exe in _SHELL_EXES:
+        return False
+    if cls.lower() in _SHELL_CLASSES or exstyle & 0x80:                 # WS_EX_TOOLWINDOW: barras flotantes, avisos
+        return False
+    return w["rect"][2] >= 150 and w["rect"][3] >= 80
+
+
+def keep_users_away() -> int:
+    """Lleva al monitor libre las ventanas de la persona que estén en el de trabajo. Devuelve cuántas movió."""
+    r = WORK[0]
+    if not QUIET[0] or r is None or _held():
+        return 0
+    dst = free_monitor()
+    if not dst:
+        return 0
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.IsZoomed.argtypes = [wintypes.HWND]
+    user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                    ctypes.c_int, wintypes.UINT]
+    n = 0
+    for w in windows():
+        if w["min"]:
+            continue
+        x, y, ww, hh = w["rect"]
+        if not _inside(r, x + ww / 2, y + hh / 2):
+            continue
+        buf = ctypes.create_unicode_buffer(128)
+        user32.GetClassNameW(w["hwnd"], buf, 128)
+        if not _is_yours(w, buf.value, user32.GetWindowLongW(w["hwnd"], -20) or 0):
+            continue
+        zoomed = bool(user32.IsZoomed(w["hwnd"]))
+        if zoomed:
+            user32.ShowWindow(w["hwnd"], 4)                             # SW_SHOWNOACTIVATE (restaurada, sin foco)
+            x, y, ww, hh = w["rect"] if not windows_rect(w["hwnd"]) else windows_rect(w["hwnd"])
+        nw, nh = min(ww, dst[2] - 40), min(hh, dst[3] - 40)
+        # mismo sitio relativo dentro del monitor (ajustado para que quepa entera)
+        nx = dst[0] + min(max(0, x - r[0]), dst[2] - nw)
+        ny = dst[1] + min(max(0, y - r[1]), dst[3] - nh)
+        user32.SetWindowPos(w["hwnd"], None, int(nx), int(ny), int(nw), int(nh), 0x0004 | 0x0010)  # NOZORDER|NOACTIVATE
+        if zoomed:
+            user32.ShowWindow(w["hwnd"], 3)                             # SW_MAXIMIZE (en el monitor libre)
+        n += 1
+    return n
+
+
+def windows_rect(hwnd) -> Optional[Tuple[int, int, int, int]]:
+    r = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+        return None
+    return r.left, r.top, r.right - r.left, r.bottom - r.top
+
+
+def _away_loop() -> None:
+    while QUIET[0]:
+        try:
+            keep_users_away()
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(AWAY_EVERY)
 
 
 def _inside(rect, x: float, y: float) -> bool:

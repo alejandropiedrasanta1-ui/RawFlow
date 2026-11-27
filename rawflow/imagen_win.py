@@ -671,6 +671,14 @@ def _open_projects(s: Screen) -> None:
     _close_uploads(s)
 
 
+def warm_up(log: Log, should_stop=lambda: False) -> None:
+    """27-nov-2026 (más rápido): mientras DxO hace sus últimas fotos, la app de Imagen se abre y queda en la lista de
+    proyectos (anuncios y ventanas sueltas cerradas). No crea ni sube nada. El paso 4 la encuentra lista."""
+    if no_apps():
+        return
+    _open_projects(Screen(log, should_stop))
+
+
 def _columns(s: Screen, boxes) -> dict:
     """Dónde empieza cada columna de la lista (por sus títulos): así no depende del tamaño de la ventana."""
     def col(name: str) -> Optional[float]:
@@ -1241,7 +1249,8 @@ def _download_edits(s: Screen, dng_dir: Path, project: str) -> None:
 
 # ------------------------------------------------------------------ todo el paso
 def edit(event_dir: Path, dng_subfolder: str, log: Log, should_stop=lambda: False, project: str = "",
-         photo_type: str = "Bodas", progress=lambda f: None, charge_ok: bool = True, wait_minutes: int = 90) -> str:
+         photo_type: str = "Bodas", progress=lambda f: None, charge_ok: bool = True, wait_minutes: int = 90,
+         warm_bridge: bool = False) -> str:
     """Crea (o retoma) el proyecto de Imagen de esa carpeta, espera la edición y descarga las ediciones a los DNG.
     Deja «.rawflow_imagen_ok» para no volver a pedir (ni pagar) esas ediciones. Devuelve el nombre del proyecto."""
     PROG[0] = progress
@@ -1274,6 +1283,8 @@ def edit(event_dir: Path, dng_subfolder: str, log: Log, should_stop=lambda: Fals
     else:
         project = free_name(project or Path(event_dir).name, [b["t"] for b in s.ocr()])
         project = _create_project(s, dng_dir, project, photo_type, pfile)
+    if warm_bridge:
+        _warm_bridge(s, dngs)                        # mientras Imagen edita en la nube (~2 min sin hacer nada)
     _wait_ready(s, dng_dir, project, wait_minutes)
     if not charge_ok:
         raise UIError("Imagen terminó de editar; falta descargar las ediciones (cobra).")
@@ -1303,6 +1314,31 @@ def clean_exports(out_dir: Path) -> int:
         if "-DxO" in p.stem:
             os.replace(p, out_dir / (p.stem.split("-DxO")[0] + ".jpg"))
     return len([p for p in out_dir.glob("*.jpg") if "-DxO" not in p.stem])
+
+
+WARM_DIR = Path(os.environ.get("TEMP") or Path.home()) / "RawFlow calentar Bridge"
+
+
+def _warm_bridge(s: Screen, dngs: List[Path]) -> None:
+    """27-nov-2026 (más rápido): Bridge se abre ANTES, mientras Imagen edita en la nube, en una carpeta aparte con UNA
+    copia de un DNG: arranca y calienta su motor de Camera Raw (en frío, las primeras ~11 fotos salían a 5,5 s en vez
+    de 1,8). Nunca abre la carpeta de los DNG de verdad (Imagen va a escribir en ellos sus ediciones). Sin clics: si
+    algo falla, no pasa nada (Bridge se abre en su momento como siempre)."""
+    import shutil
+    exe = bridge_path()
+    if not exe or not dngs:
+        return
+    try:
+        shutil.rmtree(WARM_DIR, ignore_errors=True)
+        WARM_DIR.mkdir(parents=True, exist_ok=True)
+        src = min(dngs, key=lambda p: p.stat().st_size)
+        shutil.copy2(src, WARM_DIR / ("calentar" + src.suffix))
+        if not _running(BRIDGE_EXE):
+            subprocess.Popen([str(exe), str(WARM_DIR)], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+                             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0), close_fds=True)
+            s.log("   (Bridge se va abriendo mientras Imagen edita)")
+    except Exception as e:  # noqa: BLE001
+        s.log(f"   (no pude abrir Bridge antes: {e}; se abre después)")
 
 
 def _open_bridge(s: Screen, dng_dir: Path) -> None:
@@ -1747,7 +1783,7 @@ def run(event_dir: Path, dng_subfolder: str, log: Log, should_stop=lambda: False
     fresh = not (dng_dir / ".rawflow_imagen_ok").exists() and not (dng_dir / ".rawflow_imagen_proyecto").exists()
     t0 = time.monotonic()
     edit(event_dir, dng_subfolder, log, should_stop, photo_type=photo_type,
-         progress=lambda f: progress(0.8 * f), charge_ok=charge_ok)
+         progress=lambda f: progress(0.8 * f), charge_ok=charge_ok, warm_bridge=True)
     if fresh:                                    # solo una pasada entera (subir + editar + descargar) dice el tiempo
         record("imagen", len(dngs), nbytes, time.monotonic() - t0)
     falta = core.without_imagen(dngs)
@@ -1760,6 +1796,8 @@ def run(event_dir: Path, dng_subfolder: str, log: Log, should_stop=lambda: False
     if k >= len(dngs):
         record("bridge", len(dngs), nbytes, time.monotonic() - t0)
     close_app(BRIDGE_EXE)
+    import shutil
+    shutil.rmtree(WARM_DIR, ignore_errors=True)
     return out
 
 
