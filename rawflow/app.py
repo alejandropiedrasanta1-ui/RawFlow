@@ -751,8 +751,23 @@ class MainWindow(QMainWindow):
     def _build(self):
         root = QWidget(objectName="root")
         self.setCentralWidget(root)
+        from .problemas import ProblemsButton, seed
+        if seed(self.LOG.with_name("problemas.log"), self.LOG):       # historial: lo de antes del último evento, visto
+            old = ""
+            try:
+                for ln in self.LOG.read_text(encoding="utf-8", errors="replace").splitlines():
+                    if ln[21:].startswith("=== EVENTO"):
+                        old = ln[:19]
+            except OSError:
+                pass
+            from .problemas import read_lines
+            self.settings.setValue("problemas_vistos", sum(1 for x in read_lines(self.LOG.with_name("problemas.log"))
+                                                           if x[:19] < old))
+        self.probbtn = ProblemsButton(self.LOG.with_name("problemas.log"), self.settings, root)   # abajo a la derecha
+        self.probbtn.clicked.connect(self._problems_open)
+        QTimer.singleShot(0, self._place_probbtn)
         outer = self._outer = QVBoxLayout(root)
-        outer.setContentsMargins(28, 22, 28, 26)
+        outer.setContentsMargins(28, 22, 28, 58)   # (abajo: el icono de problemas)
         outer.setSpacing(18)
 
         head = QHBoxLayout()
@@ -2335,9 +2350,29 @@ class MainWindow(QMainWindow):
                 f.write(time.strftime("%Y-%m-%d %H:%M:%S  ") + text + "\n")
         except OSError:
             pass
+        rec = self.__dict__.get("_prob_rec")
+        if rec is None:                            # problemas.log: solo reintentos, fallos y avisos (icono abajo a la der.)
+            from .problemas import Recorder
+            rec = self.__dict__["_prob_rec"] = Recorder(self.LOG.with_name("problemas.log"))
+        rec.feed(text)
         act = getattr(self, "activity", None)
         if act is not None:
             act.add(text)                          # vale desde cualquier hilo (el panel lo recoge en el suyo)
+
+    def _problems_open(self):
+        """Icono de abajo a la derecha: la lista de problemas; al abrirla quedan vistos."""
+        from .problemas import ProblemsDialog
+        d = ProblemsDialog(self.LOG.with_name("problemas.log"), self.LOG, self.LOG.parent / "diagnostico", self)
+        self.probbtn.mark_seen()
+        d.exec()
+        self.probbtn.refresh()
+
+    def _place_probbtn(self):
+        b = getattr(self, "probbtn", None)
+        if b is not None:
+            cw = self.centralWidget()
+            b.move(cw.width() - b.width() - 12, cw.height() - b.height() - 2)
+            b.raise_()
 
     @Slot(str)
     def _log_status(self, t: str):
@@ -2651,6 +2686,7 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, e):  # noqa: N802
         super().resizeEvent(e)
+        self._place_probbtn()
         lay = getattr(self, "_outer", None)
         if lay is not None:
             side = max(28, (self.width() - self.MAX_CONTENT) // 2)

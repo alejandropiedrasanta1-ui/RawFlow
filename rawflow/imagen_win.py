@@ -219,6 +219,13 @@ class Screen:
         sus reintentos: evento «26 nov 2026», Luminar)."""
         if os.environ.get("RAWFLOW_SIN_APPS") == "1" or ws.user32.GetForegroundWindow():
             return                                  # (pruebas: en un servidor sin escritorio nunca hay ventana delante)
+        # 27-nov-2026: al cambiar de ventana Windows dice un instante «ninguna delante» y se tomaba por pantalla
+        # bloqueada (evento «26 nov 2026», Luminar). Solo cuenta si sigue así 3 s seguidos.
+        t0 = time.time()
+        while time.time() - t0 < 3:
+            time.sleep(0.25)
+            if ws.user32.GetForegroundWindow():
+                return
         t0 = told = time.time()
         self.log("   (la pantalla está bloqueada o apagada: espero a que vuelvas para seguir con "
                  f"{self.exe[:-4]})")

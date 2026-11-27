@@ -115,15 +115,29 @@ def prepare(event_dir: Path, log: Log, should_stop=lambda: False) -> Path:
         raise
 
 
-def _still_prepared(s, cat: Path) -> bool:
-    """¿Sigue abierto Luminar con el catálogo vacío que se preparó?"""
-    if not cat or not Path(cat).exists() or not s.main_window():
+def _still_prepared(s, cat: Path, log: Log = lambda m: None) -> bool:
+    """¿Sigue abierto Luminar con el catálogo vacío que se preparó?
+    27-nov-2026 (evento «26 nov 2026»): antes se ponía delante para mirarlo; con Chrome de la persona delante eso
+    fallaba sin decir nada y se abría todo otra vez (catálogo de más, ~1 min perdido). Leer no necesita tenerlo
+    delante (está en el monitor de trabajo): se mira tal cual y solo si no se ve se intenta traer delante."""
+    if not cat or not Path(cat).exists():
+        log("   (lo preparado antes no sirve: el catálogo ya no está; abro Luminar de nuevo)")
         return False
-    try:
-        s.front(force=True)
-        return bool(s.find("Aún no hay fotos", boxes=s.ocr()) or s.find("Aún no hay fotos", boxes=s.ocr_tiles(3)))
-    except Exception:  # noqa: BLE001
+    if not s.main_window():
+        log("   (lo preparado antes no sirve: Luminar se cerró; lo abro de nuevo)")
         return False
+    empty = lambda boxes: bool(s.find("Aún no hay fotos", boxes=boxes))         # noqa: E731
+    for k in range(3):
+        try:
+            if k == 2:
+                s.front(force=True)
+            if empty(s.ocr()) or empty(s.ocr_tiles(3)):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(1.5)
+    log("   (lo preparado antes no sirve: Luminar no muestra el catálogo vacío; lo abro de nuevo)")
+    return False
 
 
 def run(event_dir: Path, src: Path, out: Path, log: Log, should_stop=lambda: False,
@@ -141,21 +155,32 @@ def run(event_dir: Path, src: Path, out: Path, log: Log, should_stop=lambda: Fal
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
     try:
-        if prepared and _still_prepared(s, prepared):
+        if prepared and _still_prepared(s, prepared, log):
             log(f"Luminar: ya estaba abierto con el catálogo nuevo «{Path(prepared).stem}».")
         else:
             _open(s, log)
             _new_catalog(s, _catalog_for(event_dir), log)
-        _add_folder(s, src, n, log)
-        _select_all(s)
-        _apply_preset(s, log)
-        _sync_all(s, n, log)
-        k = _export(s, tmp, n, log, should_stop, progress)
-        if k < n:
-            raise iw.UIError(f"Luminar exportó {k} de {n} fotos.")
-        ok, same = _changed(src, tmp)
-        if ok * 2 < n:                               # la mayoría salió igual: el ajuste no se pegó → reintentar
-            raise iw.UIError(f"«{PRESET}» no se aplicó a {len(same)} de {n} fotos ({', '.join(same[:5])}).")
+        # 27-nov-2026 (evento «26 nov 2026»: Luminar se abrió 4 veces): si un clic de la persona en otra ventana corta
+        # una parte, se repite ESA parte con Luminar como está, no el paso entero (catálogo nuevo + volver a añadir).
+        local = lambda what, fn, again=lambda: True: _local(s, log, should_stop, what, fn, again)   # noqa: E731
+        local("añadir las fotos", lambda: _add_folder(s, src, n, log), lambda: _nothing_added(s))
+        for vez in range(2):
+            local("aplicar el preajuste", lambda: (_select_all(s), _apply_preset(s, log)))
+            local("copiar el preajuste", lambda: _sync_all(s, n, log))
+            k = local("exportar", lambda: _export(s, tmp, n, log, should_stop, progress), lambda: not _jpgs(tmp))
+            if k < n:
+                raise iw.UIError(f"Luminar exportó {k} de {n} fotos.")
+            ok, same = _changed(src, tmp)
+            if ok * 2 >= n:
+                break
+            # la mayoría salió igual: el ajuste no se pegó. 27-nov-2026 (evento «26 nov 2026»: se pegó solo en la foto
+            # activa, 342 de 343 sin CINEMA, y era el último intento → el evento se paró). Se repite aquí UNA vez,
+            # con Luminar como está (catálogo y fotos ya dentro), antes de gastar un intento entero del paso.
+            if vez:
+                raise iw.UIError(f"«{PRESET}» no se aplicó a {len(same)} de {n} fotos ({', '.join(same[:5])}).")
+            log(f"   («{PRESET}» no se pegó en {len(same)} de {n} fotos: vuelvo a aplicarlo y exportar, sin cerrar "
+                "Luminar)")
+            shutil.rmtree(tmp, ignore_errors=True)
         if same:
             log(f"Luminar: {len(same)} foto(s) casi no cambian con «{PRESET}» ({', '.join(same[:5])}): se dejan así.")
         if out.exists():
@@ -169,6 +194,44 @@ def run(event_dir: Path, src: Path, out: Path, log: Log, should_stop=lambda: Fal
             iw.close_app(EXE, wait=30)
         except Exception:  # noqa: BLE001
             pass
+
+
+def _local(s, log: Log, should_stop, what: str, fn, again=lambda: True):
+    """`fn()` hasta 3 veces dentro del paso. Solo se repite si se cortó por la ventana (otra se puso delante, un clic
+    de la persona…), Luminar sigue abierto y `again()` dice que repetirla no duplica nada; si no, el error sube y
+    el paso se reintenta entero como siempre."""
+    from . import imagen_win as iw
+    from . import winscreen as ws
+    for k in range(3):
+        try:
+            return fn()
+        except (iw.UIError, ws.FocusLost) as e:
+            msg = str(e).splitlines()[0] if str(e) else type(e).__name__
+            if msg == "Cancelado." or should_stop() or s.should_stop() or k == 2 or not s.main_window():
+                raise
+            try:
+                ok = again()
+            except Exception:  # noqa: BLE001
+                ok = False
+            if not ok:
+                raise
+            log(f"   ({what}: {msg[:90]} · lo repito aquí, sin empezar Luminar de cero)")
+            for w in ws.windows(exe=s.exe):          # un selector de carpetas a medias se cierra
+                if any(x in w["title"].lower() for x in ("carpeta", "folder", "abrir", "examinar")):
+                    try:
+                        ws.close_window(w["hwnd"])
+                    except Exception:  # noqa: BLE001
+                        pass
+            try:
+                s.esc()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(3)
+
+
+def _nothing_added(s) -> bool:
+    """¿El catálogo sigue vacío? (entonces volver a añadir la carpeta no duplica nada)"""
+    return bool(s.find("Aún no hay fotos", boxes=s.ocr()) or s.find("Aún no hay fotos", boxes=s.ocr_tiles(3)))
 
 
 def catalog_dir() -> Path:

@@ -2638,6 +2638,68 @@ def p91():
     assert not ws._is_yours(w("nvidia overlay.exe"), "X", 0x80)                 # ventana flotante (herramienta)
     assert not ws._is_yours(w("chrome.exe", ww=100, hh=40), "X", 0)             # avisos diminutos
 
+@prueba("Luminar (27-nov-2026): si un clic en otra ventana corta una parte, se repite SOLO esa parte (no el paso con "
+        "catálogo nuevo); exportar no se repite si ya salió alguna foto; «Cancelado.» nunca se repite")
+def p92():
+    from rawflow import luminar_win as L, imagen_win as iw, winscreen as ws
+
+    class S:
+        exe = "Luminar Neo.exe"
+        def main_window(self): return {"hwnd": 1}
+        def should_stop(self): return False
+        def esc(self): pass
+    logs, n = [], {"k": 0}
+    old_w, old_sleep = ws.windows, L.time.sleep
+    ws.windows, L.time.sleep = (lambda *a, **k: []), (lambda s: None)
+    try:
+        def corta_una_vez():
+            n["k"] += 1
+            if n["k"] == 1:
+                raise ws.FocusLost("la ventana cambió mientras RawFlow escribía")
+            return 343
+        assert L._local(S(), logs.append, lambda: False, "exportar", corta_una_vez) == 343 and n["k"] == 2
+        assert any("lo repito aquí" in m for m in logs), logs
+        for err, again in ((iw.UIError("Cancelado."), lambda: True), (iw.UIError("No se abrió el selector"), lambda: False)):
+            n["k"] = 0
+            def falla():
+                n["k"] += 1
+                raise err
+            try:
+                L._local(S(), logs.append, lambda: False, "x", falla, again)
+                raise AssertionError("no subió el error")
+            except type(err):
+                assert n["k"] == 1, n
+        n["k"] = 0
+        def siempre():
+            n["k"] += 1
+            raise iw.UIError("No consigo poner Luminar delante")
+        try:
+            L._local(S(), logs.append, lambda: False, "x", siempre)
+        except iw.UIError:
+            assert n["k"] == 3
+    finally:
+        ws.windows, L.time.sleep = old_w, old_sleep
+
+
+@prueba("Problemas (27-nov-2026): reintentos, fallos, avisos y capturas van a «problemas.log» con el evento y el paso; "
+        "lo normal no")
+def p93():
+    from rawflow import problemas as pr
+    f = td.TMP / "problemas.log"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.unlink(missing_ok=True)
+    r = pr.Recorder(f)
+    for t in ("=== EVENTO C:/Fotos/26 nov 2026  (343 fotos, desde el paso 1)", "[paso 6 Luminar] run  (estimado 13:13)",
+              "    Luminar: 12 de 343 exportadas", "    Se trabó (No se abrió el selector de carpetas.). Reparando… intento 2 de 3",
+              "       (captura del fallo: 20261127-002342-selector-de-carpetas.png en «diagnostico»)",
+              "    ✓ comprobado · paso 6: 343 de 343", "=== FIN OK", "    ⚠ AVISO: algo"):
+        r.feed(t)
+    ls = pr.read_lines(f)
+    assert len(ls) == 3, ls
+    assert all("[26 nov 2026 · paso 6 Luminar]" in x for x in ls), ls
+    assert "Se trabó" in ls[0] and "captura del fallo" in ls[1] and "AVISO" in ls[2]
+    assert not pr.is_problem("=== FIN OK") and pr.is_problem("=== FIN ERROR: x")
+
 
 def main() -> int:
     ok = saltadas = 0
