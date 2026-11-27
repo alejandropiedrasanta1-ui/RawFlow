@@ -213,7 +213,26 @@ class Screen:
             self.front(force=True)
 
     # ---- leer
+    def _wait_unlocked(self) -> None:
+        """PC bloqueado (Win+L, o la pantalla de inicio de sesión): Windows no deja ver ni tocar las ventanas; no hay
+        ventana delante. Se ESPERA a que se desbloquee (antes las lecturas salían en blanco y el paso se perdía tras
+        sus reintentos: evento «26 nov 2026», Luminar)."""
+        if os.environ.get("RAWFLOW_SIN_APPS") == "1" or ws.user32.GetForegroundWindow():
+            return                                  # (pruebas: en un servidor sin escritorio nunca hay ventana delante)
+        t0 = told = time.time()
+        self.log("   (la pantalla está bloqueada o apagada: espero a que vuelvas para seguir con "
+                 f"{self.exe[:-4]})")
+        while not ws.user32.GetForegroundWindow():
+            if self.should_stop():
+                raise UIError("Cancelado.")
+            if time.time() - told > 300:
+                told = time.time()
+                self.log(f"   (sigo esperando a que se desbloquee la pantalla · {int((told - t0) // 60)} min)")
+            time.sleep(2)
+        time.sleep(2)                               # (que se redibujen las ventanas)
+
     def ocr(self, scale: int = 1) -> List[dict]:
+        self._wait_unlocked()
         try:
             if ws.QUIET[0]:
                 # modo tranquilo: para LEER no hace falta tenerla delante (está debajo de la pantalla de proceso, que
@@ -1678,6 +1697,7 @@ def _bridge_export_dir(s: Screen, dng_dir: Path, out_dir: Path, expected: int, p
                                                            if last_n else ""))
             if last_n:
                 live.set("bridge", f"{last_n:,} de {expected:,} JPEG  ·  {el / last_n:.1f} s/foto  ·  calidad 12")
+                live.set_eta(core.STEP_IMG, el / last_n * (expected - last_n))   # (lo que falta, con el ritmo real)
         per = (last_t - t0) / last_n if last_n else 0
         if time.time() - last_t > (max(120, per * 8) if last_n else 5 * 60):
             raise UIError(f"Bridge dejó de exportar ({last_n} de {expected}).")

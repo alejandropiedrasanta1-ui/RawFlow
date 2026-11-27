@@ -515,6 +515,7 @@ def _export(s, out: Path, n: int, log: Log, should_stop=lambda: False, progress=
     s.click_box(min(q, key=lambda b: b["y"]), after=1.5)
     iw._pick_folder(s, out)
     t0, last, last_t = time.time(), -1, time.time()
+    first_t = t0
     while True:                                      # hasta que estén todas y ninguna esté a medio escribir
         if should_stop():
             raise iw.UIError("Cancelado.")
@@ -525,6 +526,16 @@ def _export(s, out: Path, n: int, log: Log, should_stop=lambda: False, progress=
             last, last_t = k, time.time()
             if k:
                 log(f"Luminar: {k:,} de {n:,} exportadas")
+                if k == 1:
+                    first_t = time.time()
+                elif k >= 3:                         # lo que falta con el ritmo REAL de esta exportación (26-nov-2026:
+                    try:                             # se quedaba la estimación de antes de empezar: 8:10 → tardó 9:26)
+                        from . import core, live
+                        per = (time.time() - first_t) / (k - 1)
+                        live.set_eta(core.STEP_LUM, per * (n - k))
+                        live.set("lum", f"{k:,} de {n:,} fotos  ·  {per:.1f} s por foto  ·  CINEMA")
+                    except Exception:  # noqa: BLE001
+                        pass
         if k >= n:
             _settled(fs)                             # la última termina de escribirse (antes 3 s fijos)
             return len(_jpgs(out))

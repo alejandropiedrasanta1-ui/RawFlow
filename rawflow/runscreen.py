@@ -7,6 +7,7 @@ inputlock.py solo escucha «Esc tres veces» para cancelar. Todo se dibuja a man
 from __future__ import annotations
 
 import math
+import sys
 import time
 from typing import Callable, List, Optional
 
@@ -22,6 +23,11 @@ from .widgets import font
 
 FRAME_MS = 33                         # 30 fps con animación
 ECO_MS = 1000                         # 1 fps en ahorro (mientras DxO, Retouch4me… usan la tarjeta)
+if sys.platform == "win32":
+    # 26-nov-2026, el usuario: «que lo que muestra en tiempo real sea más fluido, sin tantos trabones». En Windows la
+    # pantalla se pinta con el procesador (no con la tarjeta: no le quita nada a DxO ni a Retouch4me) y medido cuesta
+    # 17 ms por fotograma a 1920×1080: a 15 fps es ~¼ de UN núcleo. Con 1 fps las cifras y la barra iban a saltos.
+    ECO_MS = 66
 
 
 def _ease(x: float) -> float:

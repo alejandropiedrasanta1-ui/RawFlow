@@ -301,7 +301,10 @@ def funciona_en_windows():
     try:
         core.SYSTEM = "Windows"
         importlib.reload(P)
-        assert P.full_speed() is None
+        aw = P.full_speed()                     # 26-nov-2026: en Windows mantiene la pantalla encendida (y se quita)
+        assert aw is None or hasattr(aw, "terminate")
+        if aw is not None:
+            aw.terminate()
         P.stage_manager(False); P.restore_stage_manager(); P.quit_other_apps(); P.prelaunch("X")
         # Escucha de «Esc ×3» (ya no bloquea teclado ni ratón): en Windows va por rawflow.winlock (o RawFlow.exe
         # --escuchar), nunca por rfui (Mac). El proceso se SIMULA: no hace falta poner un gancho de teclado de verdad

@@ -45,6 +45,11 @@ NOT_HERE = ("solo en", "desactivado en pruebas", "no encuentro Retouch4me", "no 
             "falta r4m_worker")
 
 
+def _real_apps() -> bool:
+    """¿Con los programas de verdad? (las pruebas los simulan: ahí un paso sin su programa se sigue omitiendo)"""
+    return os.environ.get("RAWFLOW_SIN_APPS") != "1"
+
+
 def not_installed(why: str) -> bool:
     return str(why).startswith(NOT_HERE)
 
@@ -542,6 +547,24 @@ def full_speed():
     (App Nap) a DxO, Imagen, Bridge y Retouch4me aunque estén tapados por la pantalla de RawFlow."""
     import os
     import subprocess
+    if core.SYSTEM == "Windows":
+        # 26-nov-2026 (evento «26 nov 2026», 211 fotos): la pantalla se apagó sola a los 15 min sin tocar nada; con el
+        # monitor apagado Windows ya no dibuja las ventanas y Luminar salía EN BLANCO en las capturas: el paso 6 se
+        # perdió. Mientras dura el evento, ni la pantalla se apaga ni el equipo se suspende (lo de siempre vuelve
+        # al acabar). Va en el hilo del evento: se quita en ese mismo hilo (terminate()).
+        import ctypes
+
+        class _Awake:
+            def __init__(self):
+                ok = ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002)
+                self.ok = bool(ok)
+
+            def terminate(self):
+                ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)      # ES_CONTINUOUS: como estaba
+        try:
+            return _Awake()
+        except Exception:  # noqa: BLE001
+            return None
     if core.SYSTEM != "Darwin":
         return
     for b in _HELPER_APPS:
@@ -855,6 +878,11 @@ class Pipeline(QThread):
                 self._warn(f"{len(pend)} foto(s) que DxO no pudo revelar se quedan en «{RAW_DIR}» "
                            f"({', '.join(names[:5])}): el resto sigue.")
                 return "done"
+            # 26-nov-2026, REGLA del usuario: «no debe saltarse los pasos». Desde aquí NINGÚN paso se da por hecho
+            # si falló: el evento se para en él (Reintentar desde ese paso). Solo DxO aparta (arriba) los RAW que no
+            # puede revelar —archivo dañado: reintentar no lo arregla—; esas fotos no siguen en ningún paso.
+            if i in (STEP_IMG, STEP_RET, STEP_LUM, STEP_PRES):
+                return None
             if i == STEP_IMG:                                  # Imagen/Bridge: DNG que no se exporta
                 if self._tanda_dirs(dngs) or not core.jpg_stems(img):
                     return None                                # Imagen no editó / tandas a medias: reintentar
@@ -960,6 +988,9 @@ class Pipeline(QThread):
             if not not_installed(why):
                 raise SetupMissing(f"Luminar: {why}. Créalo con ese nombre (o desactiva Luminar con doble clic en "
                                    "su paso) y pulsa Reintentar.")
+            if _real_apps() and why != "solo en Windows":
+                raise SetupMissing(f"Luminar: {why}. Instálalo, o desactiva Luminar con doble clic en su paso, y "
+                                   "pulsa Reintentar (ningún paso se salta).")
             self.detail.emit(f"Luminar no disponible en este equipo ({why}): paso omitido.")
             return "skip"
         out = self.ev_dir / LUM_DIR
@@ -991,6 +1022,9 @@ class Pipeline(QThread):
         from . import programas                       # Mac: ~/Library/Application Support/CineSlide;
         py = programas.cineslide_python()             # Windows: C:\Program Files (x86)\CineSlide (su propio Python)
         if not py:
+            if _real_apps():
+                raise SetupMissing("Falta CineSlide para la presentación. Instálalo, o desactiva CineSlide con doble "
+                                   "clic en su paso, y pulsa Reintentar (ningún paso se salta).")
             self.detail.emit("CineSlide no está instalado: paso omitido.")
             return "skip"
         cs_dir, cs_data = programas.cineslide_dir(), programas.cineslide_data()
@@ -1552,6 +1586,8 @@ class Pipeline(QThread):
         except Exception as e:  # noqa: BLE001
             if self._stop or str(e) == "Cancelado.":
                 raise RuntimeError("Cancelado.")
+            if _real_apps():                          # (regla: ningún paso se salta) → se reintenta y, si no, se para
+                raise RuntimeError(f"Selección IA no pudo analizar las fotos ({str(e).splitlines()[0][:80]}).")
             self.detail.emit(f"(Selección IA no pudo analizar: {str(e).splitlines()[0][:80]}; pasan todas)")
         finally:
             live.set("ia", "")
@@ -1845,6 +1881,10 @@ class Pipeline(QThread):
         if core.SYSTEM != "Darwin" and not imagen.get_api_key():
             from . import imagen_win                        # Windows sin clave API: la app ImagenAI + Bridge
             if core.SYSTEM != "Windows" or not imagen_win.available() or not imagen_win.bridge_path():
+                if _real_apps() and core.SYSTEM == "Windows":
+                    raise SetupMissing("Imagen AI: falta la app ImagenAI con Adobe Bridge (o una clave API, botón "
+                                       "«Imagen AI»). Instálala, o desactiva Imagen con doble clic en su paso, y pulsa "
+                                       "Reintentar (ningún paso se salta).")
                 self.detail.emit("Imagen AI: falta la app ImagenAI con Adobe Bridge, o una clave API (botón «Imagen AI»): "
                                  "paso omitido.")
                 return "skip"
@@ -1967,6 +2007,9 @@ class Pipeline(QThread):
                 if not not_installed(why_w):
                     raise SetupMissing(f"Retouch4me: {why_w}. Arréglalo en Arams (o desactiva Retouch4me con doble "
                                        "clic en su paso) y pulsa Reintentar.")
+                if _real_apps() and core.SYSTEM == "Windows":
+                    raise SetupMissing(f"Retouch4me: {why_w}. Instálalo, o desactiva Retouch4me con doble clic en su "
+                                       "paso, y pulsa Reintentar (ningún paso se salta).")
                 self.detail.emit(f"Retouch4me automático no disponible en este equipo ({why_w}): paso omitido.")
                 return "skip"
             if not core.jpg_stems(img):           # Imagen se omitió (sin clave API): no hay nada que retocar

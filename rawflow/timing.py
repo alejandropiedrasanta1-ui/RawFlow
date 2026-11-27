@@ -199,6 +199,13 @@ class Estimator:
                 est[3] = p("bridge", n)                       # Imagen ya editó: solo falta Bridge
             est[4] = p("ret", max(0, n - n_fin))
             est[5] = 0.0 if n_fin and n_lum >= n_fin else est[5]
+            # (26-nov-2026: «cualquier .mp4» daba la presentación por hecha y CineSlide salía «estimado 0 s» aunque
+            # hubiera que rehacerla; ahora, la misma comprobación que el paso: los dos videos y al día)
+            try:
+                from .pipeline import deliver_dir, presentation_current
+                has_pres = has_pres and presentation_current(pres, lum if n_lum else fin)
+            except Exception:  # noqa: BLE001
+                pass
             est[6] = 0.0 if has_pres else est[6]
         except Exception:  # noqa: BLE001
             pass

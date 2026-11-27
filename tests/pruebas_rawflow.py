@@ -191,7 +191,8 @@ def p06():
     assert finales(ev) == list(range(1, 8)), finales(ev)
 
 
-@prueba("Retouch4me no puede con una foto: se entrega sin retocar (tal como salió de Imagen) y el evento acaba")
+@prueba("Retouch4me no puede con una foto: lo reintenta SOLO con esa y, si no sale, el evento SE PARA en Retouch4me "
+        "(regla del 26-nov-2026: ningún paso se salta; nunca se entrega una foto sin retocar)")
 def p07():
     from rawflow import retouch_engine as re_
     ev = td._evento_tandas(6)
@@ -208,15 +209,14 @@ def p07():
             raise RuntimeError("Retouch4me: 1 fotos sin retocar (DSC1002.jpg: error del plugin)")
         f._set(re_, "retouch", retouch)
         p = td._correr(ev, 4)
-    assert "failed_step" not in p.summary, p.summary
+    assert p.summary.get("failed_step") == core.STEP_RET, p.summary    # se para en Retouch4me
     assert llamadas == [6, 1, 1, 1], llamadas                  # 4 intentos, cada uno solo con la que falta
     fin = ev / core.FINAL_SUBFOLDER
-    assert finales(ev) == list(range(1, 7)), finales(ev)
-    assert sum(q.read_bytes() == JPG_IMAGEN for q in fin.glob("*.jpg")) == 1   # la de Imagen, sin retocar
-    assert any("sin retocar" in a for a in p.summary.get("avisos", [])), p.summary
+    assert not any(q.read_bytes() == JPG_IMAGEN for q in fin.glob("*.jpg"))  # ninguna «final» sin retocar
 
 
-@prueba("CineSlide falla siempre: las fotos se entregan completas y la presentación queda para reintentar")
+@prueba("CineSlide falla siempre: el evento SE PARA en CineSlide (regla del 26-nov-2026: ningún paso se salta); "
+        "las fotos finales ya hechas se quedan y se reintenta desde ese paso")
 def p08():
     from rawflow import pipeline as pl
     ev = td._evento_tandas(5)
@@ -228,8 +228,8 @@ def p08():
             raise RuntimeError("CineSlide no pudo crear el video")
         f._set(pl.Pipeline, "_present", present)
         p = td._correr(ev, 4)
-    assert "failed_step" not in p.summary and len(veces) == 3, (p.summary, veces)
-    assert p.summary.get("sin_presentacion") and finales(ev) == list(range(1, 6)), p.summary
+    assert p.summary.get("failed_step") == core.STEP_PRES and len(veces) == 3, (p.summary, veces)
+    assert finales(ev) == list(range(1, 6)), p.summary
 
 
 @prueba("Retouch4me se corta a mitad: el reintento automático hace SOLO las que faltan")
@@ -1129,9 +1129,10 @@ def p47():
     con_dng_y_jpg(ev, 4)
     with td._Falsos() as f:
         f._set(pl.Pipeline, "_present", present_de_verdad)
-        p, estados = _correr_off(ev, 4, {5})
+        # (26-nov-2026: desactivaba el paso «5», que desde que llegó Luminar es Luminar; CineSlide es STEP_PRES)
+        p, estados = _correr_off(ev, 4, {core.STEP_PRES})
     assert "failed_step" not in p.summary, p.summary
-    assert (5, "off") in estados and not (ev / pl.PRES_DIR).exists(), estados
+    assert (core.STEP_PRES, "off") in estados and not (ev / pl.PRES_DIR).exists(), estados
     assert finales(ev) == list(range(1, 5)) and [c[0] for c in f.ret_calls] == [4]
 
 
@@ -1525,7 +1526,7 @@ def p67():
 
 
 @prueba("Paso 6 · Luminar: «CINEMA AJUSTE» a las fotos finales → «5 Fotos finales Luminar» y CineSlide hace la "
-        "presentación CON ESAS; desactivado (doble clic), las de Retouch4me; si Luminar falla del todo, el evento acaba "
+        "presentación CON ESAS; desactivado (doble clic), las de Retouch4me; si Luminar falla del todo, el evento SE PARA (ningún paso se salta) y no "
         "igual con aviso y se entregan las de Retouch4me")
 def p68():
     from rawflow import luminar_win as L, pipeline as pl
@@ -1560,8 +1561,11 @@ def p68():
             f._set(time, "sleep", lambda s: None)
             p = pl.Pipeline(ev, [], DXO, "CINEMA", [], core.STEP_LUM, off=off)
             p._run_steps()
-        assert "failed_step" not in p.summary, (caso, p.summary)
         lum = ev / core.LUMINAR_SUBFOLDER
+        if caso == "falla":                      # 26-nov-2026, regla: ningún paso se salta → se para en Luminar
+            assert p.summary.get("failed_step") == core.STEP_LUM and not usadas, (p.summary, usadas)
+            continue
+        assert "failed_step" not in p.summary, (caso, p.summary)
         if caso == "bien":
             assert llamadas == ["4 Fotos finales"] and len(list(lum.glob("*.jpg"))) == 4, llamadas
             assert usadas == [core.LUMINAR_SUBFOLDER], usadas                       # la presentación, con Luminar
