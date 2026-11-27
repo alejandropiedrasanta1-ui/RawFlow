@@ -27,7 +27,12 @@ if sys.platform == "win32":
     # 26-nov-2026, el usuario: «que lo que muestra en tiempo real sea más fluido, sin tantos trabones». En Windows la
     # pantalla se pinta con el procesador (no con la tarjeta: no le quita nada a DxO ni a Retouch4me) y medido cuesta
     # 17 ms por fotograma a 1920×1080: a 15 fps es ~¼ de UN núcleo. Con 1 fps las cifras y la barra iban a saltos.
-    ECO_MS = 66
+    # Medido en la pantalla de verdad (26-nov-2026): pintar cuesta 5 ms y, con el temporizador de PRECISIÓN, 30 fps
+    # salen constantes (hueco máximo 34 ms) gastando ~0,2 núcleos de 12; con el normal (pasos de 15,6 ms de Windows)
+    # se pedían 15 y salían 13 a tirones de 90 ms. Ahora: 30 fps estables todo el evento.
+    ECO_MS = 33
+# En ahorro, ¿siguen el cometa, las ondas y el giro? En Windows sí (procesador, no tarjeta); en el Mac no.
+ECO_ANIM = sys.platform == "win32"
 
 
 def _ease(x: float) -> float:
@@ -60,7 +65,7 @@ class RunScreen(QWidget):
         self.overall, self.shown = 0.0, 0.0
         self.step_frac = -1.0
         self.esc = False                  # True: se está escuchando «Esc ×3» (se enseña cómo cancelar)
-        self.eco = False
+        self.eco = self._rm = False       # _rm: «Reducir movimiento» del sistema (nada se anima)
         self.power = ""                   # aviso de batería («Conecta el cargador…»), vacío si va con cargador
         self._closing = False
         self.t0 = time.monotonic()
@@ -69,6 +74,8 @@ class RunScreen(QWidget):
         self._bg, self._bg_t, self._op, self._fonts = None, -1.0, -1.0, {}
         self._base, self._base_key = None, None
         self.timer = QTimer(self, interval=FRAME_MS)    # 30 fps (4.24; antes 15: el anillo y las ondas daban saltitos)
+        if sys.platform == "win32":                     # (temporizador de precisión: ver ECO_MS)
+            self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._boost = 0.0                 # hasta cuándo va fluida aunque esté en ahorro (al cambiar de paso)
         self._last_paint = 0.0
         self.timer.timeout.connect(self._frame)
@@ -125,7 +132,7 @@ class RunScreen(QWidget):
         self.overall = self.shown = 0.0
         self.fin, self.on_done = None, None
         self.step_frac, self._base = -1.0, None
-        self.eco = T.reduce_motion()                     # «Reducir movimiento» de macOS: sin animaciones
+        self.eco = self._rm = T.reduce_motion()          # «Reducir movimiento» de macOS: sin animaciones
         self._closing, self._op = False, -1.0
         self.timer.setInterval(ECO_MS if self.eco else FRAME_MS)
         self.t0 = time.monotonic()
@@ -212,14 +219,16 @@ class RunScreen(QWidget):
         p.drawPixmap(0, 0, self._base)
         # lo que se mueve: punto del logo, cometa del anillo y ondas del paso actual
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pulse = 0.6 if self.eco else 0.55 + 0.45 * math.sin(t * 3)
+        still = self.eco and not (ECO_ANIM and not self._rm)    # en Windows el ahorro no para las animaciones
+        pulse = 0.6 if still else 0.55 + 0.45 * math.sin(t * 3)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(_col(T.ACCENT, 0.18 * pulse))
         p.drawEllipse(QPointF(46, 50), 13, 13)
         p.setBrush(QColor(T.ACCENT))
         p.drawEllipse(QPointF(46, 50), 7, 7)
         cx, cy, R = W / 2, H * 0.43, min(W, H) * 0.165
-        if not self.fin and not self.eco:
+        self._still = still
+        if not self.fin and not still:
             self._comet(p, cx, cy, R, t)
             self._pulses(p, W, H, t)
             self._ring_head(p, cx, cy, R, t)
@@ -453,6 +462,9 @@ class RunScreen(QWidget):
             if not st:
                 st = "run" if run else ("off" if i < len(self.state) and self.state[i] == "off" else "wait")
                 txt = {"run": "en marcha…", "off": "desactivado", "wait": "pendiente"}[st]
+                tm = self.times[i] if i < len(self.times) else ""   # el reloj del paso: «3:12 · faltan 4 min» / «~5 min»
+                if tm and tm not in ("—", "desactivado") and st in ("run", "wait"):
+                    txt = ("en marcha  ·  " if st == "run" else "pendiente  ·  ") + tm
             f = _ease((now - ts) / 0.45) if ts else 1.0           # la marca se dibuja y la línea aparece (≤ 0,5 s)
             ic = QPointF(r.left() + 30, y + lh / 2)
             col = {"ok": T.OK, "warn": T.DANGER, "run": T.ACCENT, "off": T.FAINT, "wait": T.BORDER_HI}[st]
@@ -470,7 +482,7 @@ class RunScreen(QWidget):
                 p.setPen(QPen(_col(T.ACCENT, 0.25), 2))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawEllipse(ic, 9, 9)
-                spin = 0 if self.eco else (now * 300) % 360
+                spin = 0 if getattr(self, "_still", self.eco) else (now * 300) % 360
                 p.setPen(QPen(QColor(T.ACCENT), 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
                 p.drawArc(QRectF(ic.x() - 9, ic.y() - 9, 18, 18), int(-spin * 16), 100 * 16)
             else:

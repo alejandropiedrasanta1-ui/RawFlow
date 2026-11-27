@@ -169,7 +169,8 @@ def p05():
     assert not (ev / core.OUTPUT_SUBFOLDER / core.APARTADAS).exists(), "no deja marcas en la carpeta"
 
 
-@prueba("Bridge se deja una foto sin exportar: reintenta solo esa y, si no sale, sigue con el resto", solo_mac="Imagen por tandas mientras DxO trabaja")
+@prueba("Bridge se deja una foto sin exportar: reintenta solo esa y, si no sale, el evento SE PARA en Imagen "
+        "(regla del 26-nov-2026: ningún paso se salta)", solo_mac="Imagen por tandas mientras DxO trabaja")
 def p06():
     from rawflow import imagen_ui
     ev = td._evento_tandas(8)
@@ -185,10 +186,9 @@ def p06():
             return out
         f._set(imagen_ui, "run", bridge_sin_una)
         p = td._correr(ev, 3)
-    assert "failed_step" not in p.summary, p.summary
-    assert len(intentos) == 4 and all(s.startswith("2 DNGs/Tanda") for s in intentos[1:]), intentos
-    assert any("Bridge" in a for a in p.summary.get("avisos", [])), p.summary
-    assert finales(ev) == list(range(1, 8)), finales(ev)
+    assert p.summary.get("failed_step") == core.STEP_IMG, p.summary          # se para en Imagen
+    assert len(intentos) >= 2 and any(s.startswith("2 DNGs/Tanda") for s in intentos[1:]), intentos  # reintenta la que falta
+    assert not finales(ev), finales(ev)                                      # nada se entrega a medias
 
 
 @prueba("Retouch4me no puede con una foto: lo reintenta SOLO con esa y, si no sale, el evento SE PARA en Retouch4me "
