@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from PySide6.QtCore import QThread, Signal
 
@@ -542,6 +542,89 @@ def stop_vms(log=lambda s: None, wait: float = 0.0) -> bool:
 _HELPER_APPS = ("com.dxo-labs.PureRAWv6.standalone", "ImagenAI", "com.adobe.bridge", "com.retouch4me.arams")
 
 
+DXO_IDLE_AFTER = 90.0        # s sin el primer DNG antes de mirar si DxO está parado
+DXO_IDLE_WINDOW = 45.0       # s seguidos sin procesador ni disco = parado
+
+
+def _dxo_usage() -> Optional[float]:
+    """Trabajo hecho por DxO hasta ahora: segundos de procesador + MB leídos/escritos (None: no se puede medir)."""
+    try:
+        import psutil
+    except Exception:  # noqa: BLE001
+        return None
+    tot, found = 0.0, False
+    for p in psutil.process_iter(["name"]):
+        if not any(k in (p.info.get("name") or "").lower() for k in DXO_EXES):
+            continue
+        try:
+            c = p.cpu_times()
+            io = p.io_counters()
+            tot += c.user + c.system + (io.read_bytes + io.write_bytes + getattr(io, "other_bytes", 0)) / 1e6
+            found = True
+        except Exception:  # noqa: BLE001
+            pass
+    return tot if found else None
+
+
+def _dxo_idle(clk: dict, now: float, usage=None) -> bool:
+    """¿DxO lleva DXO_IDLE_WINDOW s sin hacer nada (menos de 2 entre segundos de procesador y MB de disco)? Guarda muestras en `clk`."""
+    samples = clk.setdefault("usage", [])
+    if usage is None and samples and now - samples[-1][0] < 3:      # mirar los procesos cada 3 s basta
+        return clk.get("idle", False)
+    u = _dxo_usage() if usage is None else usage
+    if u is None:
+        return False
+    samples.append((now, u))
+    while len(samples) > 2 and now - samples[1][0] >= DXO_IDLE_WINDOW:
+        samples.pop(0)
+    t_old, u_old = samples[0]
+    clk["idle"] = now - t_old >= DXO_IDLE_WINDOW and u - u_old < 2.0
+    return clk["idle"]
+
+
+BOOST_EXES = ("pureraw", "imagenai", "adobe bridge", "luminar neo", "retouch4me", "cineslide")
+BOOST_EVERY = 4.0
+
+
+def boost_apps(end, every: float = BOOST_EVERY) -> set:
+    """Windows, mientras dura el evento: DxO, Imagen, Bridge, Retouch4me, Luminar y CineSlide con prioridad «por
+    encima de lo normal». La persona sigue usando el equipo (Chrome, DaVinci…) y, a la par, Windows repartía el
+    procesador a medias: Bridge exportando (todo procesador) iba más lento en cuanto había otra cosa abierta. Con
+    esto los programas del evento van primero; lo de la persona sigue fluido (el ratón, el teclado y las ventanas
+    tienen su propio empuje en Windows). Al acabar, los que sigan abiertos vuelven a «normal»."""
+    try:
+        import psutil
+    except Exception:  # noqa: BLE001
+        return set()
+    seen = {}
+    while True:
+        try:
+            for p in psutil.process_iter(["pid", "name"]):
+                n = (p.info.get("name") or "").lower()
+                if p.info["pid"] in seen or not any(k in n for k in BOOST_EXES):
+                    continue
+                try:
+                    if p.nice() == psutil.NORMAL_PRIORITY_CLASS:
+                        p.nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
+                        seen[p.info["pid"]] = p
+                    else:
+                        seen[p.info["pid"]] = None        # ya iba con otra prioridad: no se toca
+                except Exception:  # noqa: BLE001
+                    seen[p.info["pid"]] = None
+        except Exception:  # noqa: BLE001
+            pass
+        if end.wait(every):
+            break
+    for p in seen.values():
+        if p is not None:
+            try:
+                if p.is_running() and p.nice() == psutil.ABOVE_NORMAL_PRIORITY_CLASS:
+                    p.nice(psutil.NORMAL_PRIORITY_CLASS)
+            except Exception:  # noqa: BLE001
+                pass
+    return set(seen)
+
+
 def full_speed():
     """Todo al 100 % mientras dura el evento: el Mac no se duerme ni baja el ritmo, y macOS no frena
     (App Nap) a DxO, Imagen, Bridge y Retouch4me aunque estén tapados por la pantalla de RawFlow."""
@@ -558,9 +641,13 @@ def full_speed():
             def __init__(self):
                 ok = ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002)
                 self.ok = bool(ok)
+                import threading
+                self._end = threading.Event()
+                threading.Thread(target=boost_apps, args=(self._end,), daemon=True).start()
 
             def terminate(self):
                 ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)      # ES_CONTINUOUS: como estaba
+                self._end.set()
         try:
             return _Awake()
         except Exception:  # noqa: BLE001
@@ -1711,6 +1798,11 @@ class Pipeline(QThread):
                     self.detail.emit(f"DxO pidió el módulo óptico de «{gear}»: lo descarga y sigue…")
                     changed = now                            # la descarga lleva su tiempo: el vigilante empieza de nuevo
             per = (changed - t0) / done if done else 0
+            if not done and now - changed > DXO_IDLE_AFTER and _dxo_idle(clk, now):
+                # 26-nov-2026 (211 fotos): DxO se quedó 5 min quieto sin empezar y luego, reintentado, fue normal
+                # (lo normal: el primer DNG a los 16-28 s). Si a los 90 s no hay ninguno Y DxO no hace nada (ni
+                # procesador ni disco en 45 s), se reintenta ya; si está cargando o bajando algo, se espera como antes.
+                raise RuntimeError(f"DxO no empezó (0 de {total}) y está parado: lo reinicio.")
             if now - changed > (max(180, per * 6) if done else 5 * 60):
                 if not done:
                     raise RuntimeError(f"DxO no empezó (0 de {total}): mira si DxO PureRAW pide algo en su ventana.")

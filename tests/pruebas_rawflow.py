@@ -2521,6 +2521,64 @@ def p87():
     assert not clics                                                      # sin anuncio no se toca nada
 
 
+@prueba("DxO (27-nov-2026, más rápido): si a los 90 s no hay ningún DNG y DxO no usa procesador ni disco en 45 s, se "
+        "reinicia ya (antes esperaba 5 min); si está trabajando (cargando, bajando un módulo) se sigue esperando")
+def p88():
+    from rawflow import pipeline as pl
+    clk = {}
+    for t in range(0, 50, 5):                                    # parado: el contador casi no se mueve
+        idle = pl._dxo_idle(clk, 100.0 + t, usage=10.0 + t * 0.01)
+    assert idle, clk
+    clk = {}
+    for t in range(0, 50, 5):                                    # trabajando: procesador y disco suben
+        idle = pl._dxo_idle(clk, 100.0 + t, usage=10.0 + t * 2)
+    assert not idle, clk
+    clk = {}
+    for t in range(0, 30, 5):                                    # menos de 45 s mirando: aún no se decide
+        idle = pl._dxo_idle(clk, 100.0 + t, usage=10.0)
+    assert not idle, clk
+
+
+@prueba("Windows (27-nov-2026, más rápido): durante el evento DxO, Imagen, Bridge, Retouch4me, Luminar y CineSlide van "
+        "con prioridad «por encima de lo normal» (la persona sigue usando el equipo) y al acabar vuelven a «normal»")
+def p89():
+    import threading
+    from rawflow import pipeline as pl
+    import psutil
+    if not hasattr(psutil, "ABOVE_NORMAL_PRIORITY_CLASS"):
+        raise Saltada("solo Windows: prioridades de Windows")
+    puestas = []
+
+    class P:
+        def __init__(self, pid, name, nice):
+            self.info, self._n = {"pid": pid, "name": name}, nice
+
+        def nice(self, v=None):
+            if v is None:
+                return self._n
+            puestas.append((self.info["name"], v))
+            self._n = v
+
+        def is_running(self):
+            return True
+    procs = [P(1, "Adobe Bridge.exe", psutil.NORMAL_PRIORITY_CLASS), P(2, "chrome.exe", psutil.NORMAL_PRIORITY_CLASS),
+             P(3, "Retouch4me Arams.exe", psutil.NORMAL_PRIORITY_CLASS),
+             P(4, "PureRAWv6.exe", psutil.HIGH_PRIORITY_CLASS)]          # ya iba más alto: no se toca
+    orig = psutil.process_iter
+    psutil.process_iter = lambda attrs=None: list(procs)
+    try:
+        end = threading.Event()
+        end.set()
+        vistos = pl.boost_apps(end, every=0.01)
+    finally:
+        psutil.process_iter = orig
+    assert vistos == {1, 3, 4}, vistos                                    # chrome: nunca
+    assert puestas == [("Adobe Bridge.exe", psutil.ABOVE_NORMAL_PRIORITY_CLASS),
+                       ("Retouch4me Arams.exe", psutil.ABOVE_NORMAL_PRIORITY_CLASS),
+                       ("Adobe Bridge.exe", psutil.NORMAL_PRIORITY_CLASS),
+                       ("Retouch4me Arams.exe", psutil.NORMAL_PRIORITY_CLASS)], puestas
+
+
 def main() -> int:
     ok = saltadas = 0
     print(f"PRUEBAS DE RAWFLOW ({len(PRUEBAS)} casos)\n", flush=True)
