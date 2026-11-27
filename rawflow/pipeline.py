@@ -3,7 +3,7 @@
   1  Memoria → <evento>/Original            (mueve los RAW: copia, verifica y borra de la memoria)
   2  DxO PureRAW (CINEMA) → <evento>/DNGs
   3  Imagen AI → <evento>/DNGs/Imagen AI    (respaldo de lo que entrega Imagen)
-  4  Retouch4me Arams (CINEMA) → <evento>/4 Fotos finales (de «3 Imagen AI»)
+  4  Retouch4me Arams (CINEMA) → <evento>/1 Original/Retouch4me (de «1 Original/Imagen AI»)
 
 Corre en un hilo; si un paso falla, se puede reanudar desde ese paso con la misma carpeta.
 
@@ -58,13 +58,13 @@ DXO_EXES = ("pureraw", "dxo pureraw")   # .exe de DxO PureRAW (en minúsculas): 
 
 RAW_DIR = core.RAW_SUBFOLDER          # "1 Original"
 DNG_DIR = core.OUTPUT_SUBFOLDER       # "2 DNGs"
-IMAGEN_DIR = core.IMAGEN_SUBFOLDER    # «3 Imagen AI» (en la carpeta del evento, desde 4.15)
-JPEG_SIN_DIR = core.JPEG_SIN_SUBFOLDER  # «3 JPEG sin Imagen», si Imagen está DESACTIVADO (doble clic en su paso)
+IMAGEN_DIR = core.IMAGEN_SUBFOLDER    # «1 Original/Imagen AI» (4.15-4.37: «3 Imagen AI»)
+JPEG_SIN_DIR = core.JPEG_SIN_SUBFOLDER  # «1 Original/JPEG sin Imagen», si Imagen está DESACTIVADO (doble clic en su paso)
 from .core import STEP_DXO, STEP_FINAL, STEP_IMG, STEP_LUM, STEP_MOVE, STEP_PRES, STEP_RET, STEP_SEL  # noqa: E402
 TOGGLEABLE = (STEP_SEL, STEP_IMG, STEP_RET, STEP_LUM, STEP_PRES)   # con doble clic (Mover y DxO, siempre)
-FINAL_DIR = core.FINAL_SUBFOLDER      # «4 Fotos finales»
-LUM_DIR = core.LUMINAR_SUBFOLDER      # «5 Fotos finales Luminar»
-PRES_DIR = core.PRES_SUBFOLDER        # «6 Presentación de fotos»
+FINAL_DIR = core.FINAL_SUBFOLDER      # «1 Original/Retouch4me» (con Luminar desactivado: «3 Fotos finales»)
+LUM_DIR = core.LUMINAR_SUBFOLDER      # «3 Fotos finales»
+PRES_DIR = core.PRES_SUBFOLDER        # «4 Presentación de fotos»
 CINESLIDE_DIR = Path.home() / "Library/Application Support/CineSlide"
 PRES_THEME = "4"                      # Tema 4 · Montón de fotos
 
@@ -81,15 +81,34 @@ STEPS = [                              # (paso, la carpeta donde deja lo suyo), 
 
 def deliver_dir(ev: Path, off=()) -> Path:
     """Las fotos que se entregan y con las que se hace la presentación: las de Luminar si ese paso está activo y ya
-    exportó; si no, las de Retouch4me («4 Fotos finales»)."""
+    exportó; si no, las de Retouch4me."""
     lum = Path(ev) / LUM_DIR
-    if STEP_LUM not in set(off) and lum.is_dir() and any(lum.glob("*.jp*g")):
+    if luminar_on(off) and lum.is_dir() and any(lum.glob("*.jp*g")):
         return lum
-    return Path(ev) / FINAL_DIR
+    return retouch_dir(ev, off)
+
+
+def luminar_on(off=()) -> bool:
+    """¿Este evento pasa por Luminar? (no desactivado con doble clic en su paso). En el Mac, donde ese paso no
+    existe, las de Retouch4me se quedan en «1 Original/Retouch4me» y son las que se entregan (deliver_dir)."""
+    return STEP_LUM not in set(off)
+
+
+def retouch_dir(ev: Path, off=()) -> Path:
+    """Donde deja Retouch4me sus fotos: «1 Original/Retouch4me» si luego va Luminar; si no, directamente «3 Fotos
+    finales» (pedido 27-nov-2026). Si Luminar se desactivó con el retoque ya hecho en «1 Original/Retouch4me» (y
+    «3 Fotos finales» vacía), se usa esa: nunca se repiten horas de Retouch4me por eso."""
+    ev = Path(ev)
+    inner = ev / FINAL_DIR
+    if luminar_on(off):
+        return inner
+    top = ev / LUM_DIR
+    has = lambda d: d.is_dir() and any(q for q in d.glob("*.jp*g") if not q.name.startswith("."))   # noqa: E731
+    return inner if has(inner) and not has(top) else top
 
 
 def pres_name(v: Path, n: int) -> str:
-    """Nombre del video en «6 Presentación de fotos»: «Presentación horizontal.mp4» / «Presentación vertical.mp4»."""
+    """Nombre del video en «4 Presentación de fotos»: «Presentación horizontal.mp4» / «Presentación vertical.mp4»."""
     s = v.stem.lower()                    # CineSlide añade la fecha: «Presentación_horizontal 2026-11-26 08.00»
     for k in ("horizontal", "vertical"):
         if k in s:
@@ -123,7 +142,7 @@ def resume_step(ev: Path, off=()):
     None = la carpeta no tiene fotos en «1 Original»."""
     off = set(off)
     core.migrate_event_layout(ev)                      # evento de antes de 4.15: carpetas 1-5
-    raw, dngs, img, final = folders(ev, STEP_IMG not in off)
+    raw, dngs, img, final = folders(ev, STEP_IMG not in off, off)
     goods = core.good_raws(ev)
     if not goods:
         return None
@@ -142,7 +161,7 @@ def resume_step(ev: Path, off=()):
     n_fin = len([q for q in final.glob("*.jp*g") if not q.name.startswith(".")]) if final.is_dir() else 0
     if n_fin < len(core.jpg_stems(img)):
         return STEP_RET, "fotos finales"
-    if STEP_LUM not in off:
+    if luminar_on(off):
         from . import luminar_win
         lum = ev / LUM_DIR
         n_lum = len([q for q in lum.glob("*.jp*g") if not q.name.startswith(".")]) if lum.is_dir() else 0
@@ -153,9 +172,9 @@ def resume_step(ev: Path, off=()):
     return STEP_IMG, ""
 
 
-def folders(event: Path, imagen: bool = True):
+def folders(event: Path, imagen: bool = True, off=()):
     dngs = event / DNG_DIR
-    return event / RAW_DIR, dngs, event / (IMAGEN_DIR if imagen else JPEG_SIN_DIR), event / FINAL_DIR
+    return event / RAW_DIR, dngs, event / (IMAGEN_DIR if imagen else JPEG_SIN_DIR), retouch_dir(event, off)
 
 
 _SM_FLAG = Path.home() / "Library/Application Support/RawFlow/stage_manager_on"
@@ -980,7 +999,8 @@ class Pipeline(QThread):
 
     def _f(self):
         """Carpetas de ESTE evento (los JPEG del paso 3 van a «JPEG sin Imagen» si Imagen está desactivado)."""
-        return folders(self.ev_dir, STEP_IMG not in getattr(self, "off", ()))
+        off = getattr(self, "off", ())
+        return folders(self.ev_dir, STEP_IMG not in off, off)
 
     def _with_retries(self, i: int, fn):
         tries = self.RETRIES.get(i, 1)
@@ -1136,7 +1156,7 @@ class Pipeline(QThread):
     # ---- 6 Luminar
     def _luminar(self):
         """Luminar Neo (Windows): catálogo nuevo del evento, «CINEMA AJUSTE» a todas las fotos finales y exportación
-        JPEG al 100 % → <evento>/5 Fotos finales Luminar (mismos nombres: 1.jpg, 2.jpg…). Ver luminar_win."""
+        JPEG al 100 % → <evento>/3 Fotos finales (mismos nombres: 1.jpg, 2.jpg…). Ver luminar_win."""
         if STEP_LUM in self.off:
             self.detail.emit("Luminar desactivado: las fotos finales son las de Retouch4me.")
             return "off"
@@ -1176,7 +1196,7 @@ class Pipeline(QThread):
     # ---- 7
     def _present(self):
         """CineSlide (tema 4) con las fotos finales (las de Luminar si ese paso está activo) →
-        <evento>/6 Presentación de fotos/Presentación.mp4."""
+        <evento>/4 Presentación de fotos/Presentación.mp4."""
         import subprocess
         if STEP_PRES in self.off:
             self.detail.emit("CineSlide desactivado: este evento va sin presentación.")
@@ -1369,7 +1389,7 @@ class Pipeline(QThread):
 
     def _bridge_only(self):
         """Imagen AI DESACTIVADO (doble clic en su paso): Bridge exporta los DNG tal cual, sin pedir nada a Imagen,
-        a «3 JPEG sin Imagen» (nunca a «3 Imagen AI»: así nadie confunde unas fotos con otras)."""
+        a «1 Original/JPEG sin Imagen» (nunca a «Imagen AI»: así nadie confunde unas fotos con otras)."""
         _, dngs, img, _ = self._f()
         if core.SYSTEM != "Darwin":                       # Windows: Bridge con imagen_win (mismo recorrido, por menú)
             from . import imagen_win
@@ -1415,7 +1435,7 @@ class Pipeline(QThread):
 
     def _finals_without_retouch(self):
         """Retouch4me DESACTIVADO (doble clic en su paso): las fotos finales son los JPEG del paso 3 tal cual, copiados
-        y numerados en «4 Fotos finales» (las que ya estuvieran retocadas de antes se quedan)."""
+        y numerados en «1 Original/Retouch4me» (las que ya estuvieran retocadas de antes se quedan)."""
         import shutil
         _, dngs, img, final = self._f()
         con_imagen = self._imagen_app() and STEP_IMG not in self.off

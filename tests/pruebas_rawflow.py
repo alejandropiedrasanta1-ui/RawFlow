@@ -1100,7 +1100,7 @@ def p45():
         p, estados = _correr_off(ev, 2, {3})
     assert "failed_step" not in p.summary, p.summary
     assert f.subidas == [] and f.ediciones == [] and f.bridges == [], (f.subidas, f.ediciones, f.bridges)
-    assert exportadas == [("2 DNGs", core.JPEG_SIN_SUBFOLDER)], exportadas
+    assert exportadas == [("2 DNGs", Path(core.JPEG_SIN_SUBFOLDER).name)], exportadas
     dngs = ev / core.OUTPUT_SUBFOLDER
     assert not (ev / core.IMAGEN_SUBFOLDER).exists() and len(list((ev / core.JPEG_SIN_SUBFOLDER).glob("*.jpg"))) == 40
     assert (3, "off") in estados and [c[0] for c in f.ret_calls] == [40], (estados, f.ret_calls)
@@ -1319,39 +1319,50 @@ def p53():
     assert finales(ev) == list(range(1, 7)) and core.source_stem(fin / "3.jpg") == "dsc1002"
 
 
-@prueba("Carpetas del evento en el orden de los pasos: 1 Original · 2 DNGs · 3 Imagen AI · 4 Fotos finales · "
-        "5 Fotos finales Luminar · 6 Presentación de fotos; un evento de antes se reordena solo (solo cambia carpetas de sitio: ni copia ni borra)")
+@prueba("Carpetas del evento (4.38): 1 Original · 2 DNGs · 3 Fotos finales · 4 Presentación de fotos; Imagen AI y "
+        "Retouch4me dentro de «1 Original»; un evento de antes se reordena solo (solo cambia carpetas de sitio: ni copia ni borra)")
 def p54():
     from rawflow import pipeline as pl
     ev = td._evento_tandas(3)
-    assert [x.name for x in pl.folders(ev)] == ["1 Original", "2 DNGs", "3 Imagen AI", "4 Fotos finales"]
-    assert pl.PRES_DIR == "6 Presentación de fotos" and pl.LUM_DIR == "5 Fotos finales Luminar" and pl.folders(ev, False)[2].name == "3 JPEG sin Imagen"
+    sale = lambda q: q.relative_to(ev).as_posix()                       # noqa: E731
+    with td._Falsos() as f:
+        f._set(core, "SYSTEM", "Windows")
+        assert [sale(x) for x in pl.folders(ev)] == ["1 Original", "2 DNGs", "1 Original/Imagen AI", "1 Original/Retouch4me"]
+        assert sale(pl.folders(ev, True, {core.STEP_LUM})[3]) == "3 Fotos finales"     # sin Luminar: directo a las finales
+    assert pl.PRES_DIR == "4 Presentación de fotos" and pl.LUM_DIR == "3 Fotos finales" and sale(pl.folders(ev, False)[2]) == "1 Original/JPEG sin Imagen"
     dngs = ev / core.OUTPUT_SUBFOLDER                       # evento hecho con 4.14
     viejas = {}
     for i in range(3):
         td.write(dngs / f"DSC{1000 + i}-DxO_DeepPRIME XD3.dng", td._mini_dng())
         viejas[f"j{i}"] = td.write(dngs / "Imagen AI" / f"DSC{1000 + i}.jpg", JPG_IMAGEN)
-        viejas[f"f{i}"] = td.write(ev / "3 Fotos finales" / f"{i + 1}.jpg", JPG_IMAGEN)
-    viejas["v"] = td.write(ev / "4 Presentación de fotos" / "Presentación.mp4", b"MP4")
+    viejas["v"] = td.write(ev / "6 Presentación de fotos" / "Presentación.mp4", b"MP4")
     inodos = {k: os.stat(q).st_ino for k, q in viejas.items()}
-    # un solo video (de antes del 26-nov-2026): falta la presentación en los dos formatos… y ya está reordenado
-    assert pl.resume_step(ev) == (core.STEP_PRES, "la presentación"), pl.resume_step(ev)
+    core.migrate_event_layout(ev)
     nombres = sorted(x.name for x in ev.iterdir() if not x.name.startswith("."))
-    assert nombres == ["1 Original", "2 DNGs", "3 Imagen AI", "4 Fotos finales", "6 Presentación de fotos"], nombres
+    assert nombres == ["1 Original", "2 DNGs", "4 Presentación de fotos"], nombres
     assert not (dngs / "Imagen AI").exists()
-    nuevos = {f"j{i}": ev / "3 Imagen AI" / f"DSC{1000 + i}.jpg" for i in range(3)}
-    nuevos.update({f"f{i}": ev / "4 Fotos finales" / f"{i + 1}.jpg" for i in range(3)})
-    nuevos["v"] = ev / "6 Presentación de fotos" / "Presentación.mp4"
-    assert all(os.stat(nuevos[k]).st_ino == inodos[k] for k in inodos)  # los mismos archivos: nada copiado ni borrado
+    nuevos = {f"j{i}": ev / "1 Original" / "Imagen AI" / f"DSC{1000 + i}.jpg" for i in range(3)}
+    nuevos["v"] = ev / "4 Presentación de fotos" / "Presentación.mp4"
+    assert all(os.stat(nuevos[k]).st_ino == inodos[k] for k in nuevos)  # los mismos archivos: nada copiado ni borrado
     assert core.migrate_event_layout(ev) == []                          # otra vez: nada que hacer
     td.write(dngs / "Imagen AI" / "DSC9999.jpg", JPG_IMAGEN)            # restos en el sitio viejo: se juntan
-    assert core.migrate_event_layout(ev) and (ev / "3 Imagen AI" / "DSC9999.jpg").exists()
-    assert not (dngs / "Imagen AI").exists() and len(list((ev / "3 Imagen AI").glob("*.jpg"))) == 4
-    ev2 = td._evento_tandas(2)                                          # evento hecho con 4.22: «5 Presentación»
-    v = td.write(ev2 / "5 Presentación de fotos" / "Presentación.mp4", b"MP4")
-    ino = os.stat(v).st_ino
+    assert core.migrate_event_layout(ev) and (ev / "1 Original" / "Imagen AI" / "DSC9999.jpg").exists()
+    assert not (dngs / "Imagen AI").exists() and len(list((ev / "1 Original" / "Imagen AI").glob("*.jpg"))) == 4
+    # evento hecho con 4.23-4.37: 3 Imagen AI · 4 Fotos finales · 5 Fotos finales Luminar · 6 Presentación de fotos
+    ev2 = td._evento_tandas(2)
+    old = {"3 Imagen AI/a.jpg": "1 Original/Imagen AI/a.jpg", "4 Fotos finales/1.jpg": "1 Original/Retouch4me/1.jpg",
+           "5 Fotos finales Luminar/1.jpg": "3 Fotos finales/1.jpg",
+           "6 Presentación de fotos/Presentación.mp4": "4 Presentación de fotos/Presentación.mp4"}
+    ino = {k: os.stat(td.write(ev2 / k, b"X" + k.encode())).st_ino for k in old}
     core.migrate_event_layout(ev2)
-    assert os.stat(ev2 / "6 Presentación de fotos" / "Presentación.mp4").st_ino == ino and not (ev2 / "5 Presentación de fotos").exists()
+    assert all(os.stat(ev2 / v).st_ino == ino[k] for k, v in old.items())
+    assert sorted(x.name for x in ev2.iterdir() if not x.name.startswith(".")) == [
+        "1 Original", "3 Fotos finales", "4 Presentación de fotos"]
+    ev3 = td._evento_tandas(2)                                          # evento hecho con 4.22: «5 Presentación»
+    v = td.write(ev3 / "5 Presentación de fotos" / "Presentación.mp4", b"MP4")
+    ino = os.stat(v).st_ino
+    core.migrate_event_layout(ev3)
+    assert os.stat(ev3 / "4 Presentación de fotos" / "Presentación.mp4").st_ino == ino and not (ev3 / "5 Presentación de fotos").exists()
 
 
 @prueba("Comprobado: al acabar cada paso se revisa SU carpeta (fotos, DNG completos, con Imagen una a una, retocadas) "
@@ -1525,7 +1536,7 @@ def p67():
         app.processEvents()
 
 
-@prueba("Paso 6 · Luminar: «CINEMA AJUSTE» a las fotos finales → «5 Fotos finales Luminar» y CineSlide hace la "
+@prueba("Paso 6 · Luminar: «CINEMA AJUSTE» a las fotos finales → «3 Fotos finales» y CineSlide hace la "
         "presentación CON ESAS; desactivado (doble clic), las de Retouch4me; si Luminar falla del todo, el evento SE PARA (ningún paso se salta) y no "
         "igual con aviso y se entregan las de Retouch4me")
 def p68():
@@ -1567,12 +1578,12 @@ def p68():
             continue
         assert "failed_step" not in p.summary, (caso, p.summary)
         if caso == "bien":
-            assert llamadas == ["4 Fotos finales"] and len(list(lum.glob("*.jpg"))) == 4, llamadas
+            assert llamadas == ["Retouch4me"] and len(list(lum.glob("*.jpg"))) == 4, llamadas
             assert usadas == [core.LUMINAR_SUBFOLDER], usadas                       # la presentación, con Luminar
         elif caso == "apagado":
-            assert not llamadas and not lum.exists() and usadas == [core.FINAL_SUBFOLDER], (llamadas, usadas)
+            assert not llamadas and not lum.exists() and usadas == [Path(core.FINAL_SUBFOLDER).name], (llamadas, usadas)
         else:
-            assert len(llamadas) == 0 and usadas == [core.FINAL_SUBFOLDER], usadas
+            assert len(llamadas) == 0 and usadas == [Path(core.FINAL_SUBFOLDER).name], usadas
             assert any("Luminar" in a for a in p.summary.get("avisos", [])), p.summary
             assert p.summary.get("sin_luminar")
 

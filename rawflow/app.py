@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QGridLayout,
 from . import core
 from . import theme as T
 from .core import STEP_FINAL, STEP_IMG, STEP_PRES, STEP_RET, STEP_SEL
-from .pipeline import (FINAL_DIR, IMAGEN_DIR, JPEG_SIN_DIR, PRES_DIR, STEPS, TOGGLEABLE, Pipeline, event_root,
+from .pipeline import (FINAL_DIR, IMAGEN_DIR, JPEG_SIN_DIR, PRES_DIR, STEPS, TOGGLEABLE, Pipeline, deliver_dir, event_root,
                        folders, resume_step)
 from .timing import Estimator, approx, end_phrase, fmt, fmt_est
 from . import anim
@@ -325,7 +325,7 @@ STEP_ICONS = ("ph.download-simple", "ph.sparkle", "ph.aperture", "ph.magic-wand"
 
 
 class StepPill(QFrame):
-    """Un paso de la secuencia: número, nombre y su carpeta («→ 3 Imagen AI»); al acabar, lo COMPROBADO
+    """Un paso de la secuencia: número, nombre y su carpeta («→ Imagen AI»); al acabar, lo COMPROBADO
     («✓ 597 con Imagen»). Cambia de color con una transición corta. Doble clic: activa o desactiva el paso
     (Imagen AI, Retouch4me, CineSlide)."""
     double_clicked = Signal(int)
@@ -1773,8 +1773,7 @@ class MainWindow(QMainWindow):
             d = Path(self.base_dir) / f"{core.clean_name(self.name_edit.text()) or core.date_name()} - Evento 1…{n}"
         self.dest_label.setText(str(d))
         self.tree.setText("Dentro:   " + "   ·   ".join(
-            (core.RAW_SUBFOLDER, core.OUTPUT_SUBFOLDER, IMAGEN_DIR if STEP_IMG not in self.steps_off else JPEG_SIN_DIR,
-             FINAL_DIR) + ((core.LUMINAR_SUBFOLDER,) if core.STEP_LUM not in self.steps_off else ())   # (faltaba)
+            (core.RAW_SUBFOLDER, core.OUTPUT_SUBFOLDER, core.LUMINAR_SUBFOLDER)      # (4.38: lo intermedio, en «1 Original»)
             + ((PRES_DIR,) if STEP_PRES not in self.steps_off else ())))
 
     def _choose_base(self):
@@ -1979,7 +1978,7 @@ class MainWindow(QMainWindow):
         return {names_by_step[n] for n in str(raw).split(",") if n in names_by_step and names_by_step[n] in TOGGLEABLE}
 
     STEP_OFF_TXT = {STEP_SEL: "Selección IA desactivada: todas las fotos pasan por DxO, Imagen y Retouch4me.",
-                    STEP_IMG: "Imagen AI desactivado: Bridge exporta los JPEG sin Imagen (a «3 JPEG sin Imagen»).",
+                    STEP_IMG: "Imagen AI desactivado: Bridge exporta los JPEG sin Imagen (a «1 Original/JPEG sin Imagen»).",
                     STEP_RET: "Retouch4me desactivado: las fotos finales salen de Imagen sin retocar.",
                     STEP_PRES: "CineSlide desactivado: el evento va sin presentación."}
 
@@ -2002,7 +2001,7 @@ class MainWindow(QMainWindow):
             self.settings.setValue("pasos_apagados", ",".join(STEPS[k][0] for k in sorted(self.steps_off)))
         self.pills[i].set_off(i in self.steps_off)
         if hasattr(self, "tree"):
-            self._update_dest()                          # «3 Imagen AI» o «3 JPEG sin Imagen» en la vista previa
+            self._update_dest()                          # carpetas del evento en la vista previa
         self._log(f"Paso {i + 1} ({STEPS[i][0]}): {'desactivado' if i in self.steps_off else 'activado'} con doble clic")
         self._update_summary()
         if i == STEP_SEL and not getattr(self, "sel_engine", "x"):   # aquí no hay motor: se recuerda igual, pero se dice
@@ -2509,7 +2508,7 @@ class MainWindow(QMainWindow):
             title, text = (("Cancelado", "Puedes reintentar desde donde se quedó.") if err == "Cancelado."
                            else (f"Se detuvo en «{step}»", err.splitlines()[0][:120]))
         else:
-            n = len(list(folders(ev)[3].glob("*.jp*g")))
+            n = len(list(deliver_dir(ev, self.steps_off).glob("*.jp*g")))
             avisos = summary.get("avisos", [])
             title = "¡Listo!" if not avisos else "¡Listo, con avisos!"
             pres = "" if (summary.get("sin_presentacion") or STEP_PRES in getattr(self, "steps_off", ())) else " y la presentación"
@@ -2618,7 +2617,8 @@ class MainWindow(QMainWindow):
             if err != "Cancelado.":
                 QMessageBox.warning(self, APP_NAME, f"Paso {self.failed_step + 1} ({STEPS[self.failed_step][0]}):\n\n{err}")
         else:
-            _, _, img, final = folders(ev, STEP_IMG not in self.steps_off)
+            _, _, img, _ = folders(ev, STEP_IMG not in self.steps_off, self.steps_off)
+            final = deliver_dir(ev, self.steps_off)
             n = len(list(final.glob("*.jp*g")))
             self.progress.setValue(1.0)
             avisos = summary.get("avisos", [])
@@ -2635,8 +2635,8 @@ class MainWindow(QMainWindow):
                                 + (f" · {k} foto{'s' if k != 1 else ''} mala{'s' if k != 1 else ''} apartada{'s' if k != 1 else ''} "
                                    "en «1 Original/Fotos malas»" + (f" ({por})" if por else "") if k else "")
                                 + (f" · desactivado: {', '.join(off)}" if off else ""))
-            self.detail.setText(f"{core.RAW_SUBFOLDER} · {core.OUTPUT_SUBFOLDER} · {img.name} "
-                                f"({len(list(img.glob('*.jp*g')))}) · {FINAL_DIR} ({n})")
+            self.detail.setText(f"{core.RAW_SUBFOLDER} · {core.OUTPUT_SUBFOLDER} · {final.name} ({n})"
+                                + (f" · {PRES_DIR}" if STEP_PRES not in self.steps_off else ""))
             core.reveal_in_file_manager(ev)
             if avisos:                          # el evento terminó entero; esto es lo que no salió perfecto
                 QMessageBox.information(self, APP_NAME, "El evento terminó, con estos avisos:\n\n• "

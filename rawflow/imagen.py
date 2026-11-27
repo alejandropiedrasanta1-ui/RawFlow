@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 BASE_URL = "https://api.imagen-ai.com/v1"
-FINAL_SUBFOLDER = "4 Fotos finales"
+FINAL_SUBFOLDER = "1 Original/Retouch4me"     # (= core.FINAL_SUBFOLDER; 4.38)
 KEYCHAIN_SERVICE = "RawFlow-ImagenAI"
 UA = "RawFlow/1.2 (Imagen API)"
 

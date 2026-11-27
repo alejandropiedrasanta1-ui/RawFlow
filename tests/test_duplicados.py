@@ -289,7 +289,7 @@ def limpieza_al_terminar():
     pl.ev_dir = ev
     Pipeline._clean_traces(pl)
     left = sorted(p.relative_to(ev).as_posix() for p in ev.rglob("*") if p.is_file())
-    assert left == ["2 DNGs/A-DxO_DeepPRIME XD3.dng", f"{core.FINAL_SUBFOLDER}/1.jpg"], left
+    assert left == sorted(["2 DNGs/A-DxO_DeepPRIME XD3.dng", f"{core.FINAL_SUBFOLDER}/1.jpg"]), left
 
 
 @caso
@@ -374,7 +374,7 @@ def contar_fotos_del_proyecto():
 
 @caso
 def retouch_reanuda_sin_repetir():
-    """Retouch4me reintentado: las que ya están en «4 Fotos finales» no se vuelven a retocar."""
+    """Retouch4me reintentado: las que ya están en «1 Original/Retouch4me» no se vuelven a retocar."""
     from rawflow import arams_ui
     if core.SYSTEM != "Darwin" or not arams_ui.APP_PATH.exists():
         return                                   # necesita Retouch4me Arams instalado (en GitHub no lo está)
@@ -1292,8 +1292,8 @@ def copia_de_seguridad_de_lo_que_se_entrega():
     QApplication.instance() or QApplication([])
     from rawflow import app as ra
     d = fresh("copia")
-    fin = d / "ev" / "5 Fotos finales Luminar"
-    pres = d / "ev" / "6 Presentación de fotos"
+    fin = d / "ev" / "3 Fotos finales"
+    pres = d / "ev" / "4 Presentación de fotos"
     write(fin / "1.jpg", b"A" * 100)
     write(fin / "2.jpg", b"B" * 200)
     write(pres / "Presentación horizontal.mp4", b"V" * 300)

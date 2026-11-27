@@ -45,7 +45,7 @@ class ImagenDialog(QDialog):
         lay.setSpacing(12)
         lay.addWidget(QLabel("IMAGEN AI  ·  PASO 4", objectName="sectionTitle"))
         intro = QLabel("Con tu clave API, RawFlow sube los DNG de «2 DNGs» a Imagen, los edita con tu perfil y guarda "
-                       "los JPEG en «3 Imagen AI» (de ahí siguen a Retouch4me). También deja los .xmp junto a los DNG. "
+                       "los JPEG en «1 Original/Imagen AI» (de ahí siguen a Retouch4me). También deja los .xmp junto a los DNG. "
                        "Imagen trabaja en la nube: necesita internet y cobra por foto, como en su app. "
                        "La clave se guarda cifrada en este equipo; para quitarla, borra el campo y pulsa Guardar.",
                        objectName="muted")

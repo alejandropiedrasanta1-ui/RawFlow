@@ -1108,29 +1108,35 @@ STEP_FINAL = 7                               # la revisión final (panel COMPROB
 RAW_SUBFOLDER = "1 Original"                 # 1 Mover: los RAW
 GOOD_SUBFOLDER = "Fotos buenas"              # 2 Selección IA: dentro de «1 Original», las que siguen el proceso
 BAD_SUBFOLDER = "Fotos malas"                #   … y las apartadas (con su motivo en «motivos.txt»; nunca se borran)
-OUTPUT_SUBFOLDER = "2 DNGs"                  # 2 DxO
-IMAGEN_SUBFOLDER = "3 Imagen AI"             # 3 Imagen + Bridge: JPEG con las ediciones de Imagen
-JPEG_SIN_SUBFOLDER = "3 JPEG sin Imagen"     # 3 si Imagen está desactivado (doble clic): Bridge tal cual
-FINAL_SUBFOLDER = "4 Fotos finales"          # 4 Retouch4me retoca las de «3 Imagen AI»
-LUMINAR_SUBFOLDER = "5 Fotos finales Luminar"  # 5 Luminar Neo: preajuste «CINEMA AJUSTE» a las finales (24-nov-2026)
-PRES_SUBFOLDER = "6 Presentación de fotos"   # 6 CineSlide (hasta 4.22 era «5 Presentación de fotos»: se migra)
+OUTPUT_SUBFOLDER = "2 DNGs"                  # DxO
+# 27-nov-2026 (4.38, orden pedido): en el evento solo 1 Original · 2 DNGs · 3 Fotos finales · 4 Presentación de fotos.
+# Lo intermedio (Imagen y Retouch4me) va DENTRO de «1 Original», junto a «Fotos buenas» y «Fotos malas».
+IMAGEN_SUBFOLDER = "1 Original/Imagen AI"    # Imagen + Bridge: JPEG con las ediciones de Imagen
+JPEG_SIN_SUBFOLDER = "1 Original/JPEG sin Imagen"   # si Imagen está desactivado (doble clic): Bridge tal cual
+FINAL_SUBFOLDER = "1 Original/Retouch4me"    # Retouch4me retoca las de Imagen (con Luminar desactivado: «3 Fotos finales»)
+LUMINAR_SUBFOLDER = "3 Fotos finales"        # Luminar Neo: «CINEMA» a las de Retouch4me → las que se entregan
+PRES_SUBFOLDER = "4 Presentación de fotos"   # CineSlide (4.23-4.37: «6 …»; hasta 4.22: «5 …»; se migran)
 
 
 def migrate_event_layout(ev) -> List[str]:
-    """Eventos de antes de 4.15 («2 DNGs/Imagen AI», «3 Fotos finales», «4 Presentación de fotos») → carpetas 1-5
-    en el orden de los pasos. Solo cambia carpetas de sitio (renombrar: instantáneo): no copia ni borra ninguna foto.
-    Si ya existen las dos, junta lo que falte en la nueva. Devuelve lo que movió."""
+    """Eventos de versiones anteriores → el orden de 4.38 (1 Original · 2 DNGs · 3 Fotos finales · 4 Presentación de
+    fotos; Imagen y Retouch4me dentro de «1 Original»). Solo cambia carpetas de sitio (renombrar: instantáneo): no
+    copia ni borra ninguna foto. Si ya existen las dos, junta lo que falte en la nueva. Devuelve lo que movió."""
     ev = Path(ev)
-    moves = [(ev / "5 Presentación de fotos", ev / PRES_SUBFOLDER),          # primero las de número más alto
-             (ev / "4 Presentación de fotos", ev / PRES_SUBFOLDER),          # (4.23: Luminar es el paso 5)
-             (ev / "3 Fotos finales", ev / FINAL_SUBFOLDER),
-             (ev / OUTPUT_SUBFOLDER / "Imagen AI", ev / IMAGEN_SUBFOLDER),
+    moves = [(ev / "6 Presentación de fotos", ev / PRES_SUBFOLDER),          # 4.23-4.37
+             (ev / "5 Presentación de fotos", ev / PRES_SUBFOLDER),          # hasta 4.22
+             (ev / "4 Fotos finales", ev / FINAL_SUBFOLDER),                 # Retouch4me (4.15-4.37) → «1 Original»
+             (ev / "5 Fotos finales Luminar", ev / LUMINAR_SUBFOLDER),       # Luminar (4.23-4.37) → «3 Fotos finales»
+             (ev / "3 Imagen AI", ev / IMAGEN_SUBFOLDER),
+             (ev / "3 JPEG sin Imagen", ev / JPEG_SIN_SUBFOLDER),
+             (ev / OUTPUT_SUBFOLDER / "Imagen AI", ev / IMAGEN_SUBFOLDER),   # antes de 4.15
              (ev / OUTPUT_SUBFOLDER / "JPEG sin Imagen", ev / JPEG_SIN_SUBFOLDER)]
     done = []
     for old, new in moves:
         try:
-            if not old.is_dir() or old.resolve() == new.resolve():
+            if not old.is_dir() or (new.exists() and old.resolve() == new.resolve()):
                 continue
+            new.parent.mkdir(parents=True, exist_ok=True)
             if not new.exists():
                 os.rename(old, new)
             else:
@@ -1143,7 +1149,7 @@ def migrate_event_layout(ev) -> List[str]:
                     old.rmdir()
                 except OSError:
                     pass
-            done.append(f"«{old.relative_to(ev)}» → «{new.name}»")
+            done.append(f"«{old.relative_to(ev).as_posix()}» → «{new.relative_to(ev).as_posix()}»")
         except OSError:
             pass
     return done

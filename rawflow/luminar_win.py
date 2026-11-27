@@ -1,13 +1,13 @@
 """Paso 6 · Luminar Neo (Windows), pedido del usuario el 24-nov-2026 (video «PASO 5 LUMINAR»):
 
   1. catálogo NUEVO para el evento (Archivo → Catálogo → Nuevo), así no se mezclan fotos de eventos distintos;
-  2. «Añadir carpeta con imágenes» (Ctrl+Mayús+N) → la carpeta «4 Fotos finales» del evento;
+  2. «Añadir carpeta con imágenes» (Ctrl+Mayús+N) → la carpeta «1 Original/Retouch4me» del evento;
   3. a una foto, el preajuste «CINEMA AJUSTE» (Mis preajustes); Acciones → Ajustes → Copiar ajustes; todas
      seleccionadas → Pegar ajustes;
-  4. Exportar → «JPEG · 100 % de calidad» → carpeta «5 Fotos finales Luminar» (mismos nombres: 1.jpg, 2.jpg…).
+  4. Exportar → «JPEG · 100 % de calidad» → carpeta «3 Fotos finales» (mismos nombres: 1.jpg, 2.jpg…).
 
 Luminar no tiene línea de comandos: se maneja su ventana leyendo la pantalla (OCR de Windows) y con clics, como
-Bridge e Imagen en imagen_win. Las fotos nunca se tocan: Luminar solo lee «4 Fotos finales» y escribe en la nueva.
+Bridge e Imagen en imagen_win. Las fotos nunca se tocan: Luminar solo lee «1 Original/Retouch4me» y escribe en la nueva.
 Al terminar se comprueba que cada foto exportada CAMBIÓ respecto a la de Retouch4me (si el preajuste no se aplicó,
 saldrían iguales) y se cierra Luminar.
 """

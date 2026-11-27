@@ -26,7 +26,7 @@ from . import core
 from .core import files_settled
 from typing import Callable, List, Optional
 
-FINAL_SUBFOLDER = "4 Fotos finales"
+FINAL_SUBFOLDER = "1 Original/Retouch4me"     # (= core.FINAL_SUBFOLDER; 4.38)
 IMAGEN_APP = "ImagenAI"
 BRIDGE_ID = "com.adobe.bridge"
 Log = Callable[[str], None]
